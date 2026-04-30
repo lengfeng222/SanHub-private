@@ -164,6 +164,7 @@ async function generateWithOpenAI(
     };
     payload.size = sizeMap[request.aspectRatio] || '1024x1024';
   }
+  console.log('[generateWithOpenAI] payload.size:', payload.size);
 
   // quality (high / medium / low) — 部分上游代理支持
   if (request.quality) {
@@ -931,6 +932,18 @@ export async function generateImage(request: ImageGenerateRequest): Promise<Gene
     request.aspectRatio,
     request.imageSize
   );
+
+  console.log('[generateImage]', {
+    modelId: model.id,
+    apiModel: model.apiModel,
+    aspectRatio: request.aspectRatio,
+    imageSize: request.imageSize,
+    resolutions: model.resolutions,
+    resolvedModel: resolvedTarget.model,
+    resolvedSize: resolvedTarget.size,
+    usedModelFromMapping: resolvedTarget.usedModelFromMapping,
+    channelType: channel.type,
+  });
 
   let result: GenerateResult;
 
