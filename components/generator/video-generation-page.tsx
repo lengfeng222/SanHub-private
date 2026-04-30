@@ -149,6 +149,8 @@ export function VideoGenerationView({
   const isSoraChannel = currentModel?.channelType === 'sora';
   const canMentionCharacterCards = isSoraChannel && characterCards.length > 0;
 
+  const modelsCacheRef = useRef<SafeVideoModel[] | null>(null);
+
   // 加载模型列表
   useEffect(() => {
     if (!isActive || modelsLoaded) {
@@ -156,11 +158,17 @@ export function VideoGenerationView({
     }
 
     const loadModels = async () => {
+      if (modelsCacheRef.current) {
+        setAvailableModels(modelsCacheRef.current);
+        setModelsLoaded(true);
+        return;
+      }
       try {
         const res = await fetch('/api/video-models');
         if (res.ok) {
           const data = await res.json();
           const models = data.data?.models || [];
+          modelsCacheRef.current = models;
           setAvailableModels(models);
           // 设置默认选中第一个模型
           if (models.length > 0) {
@@ -350,7 +358,7 @@ export function VideoGenerationView({
 
   const loadRecentGenerations = useCallback(async () => {
     try {
-      const recentGenerations = await fetchRecentUserGenerations(24);
+      const recentGenerations = await fetchRecentUserGenerations(12);
       const completedVideoGenerations = filterGenerationsByKind(
         recentGenerations.filter(
           (generation) =>
@@ -451,7 +459,7 @@ export function VideoGenerationView({
   const loadPendingTasks = useCallback(async () => {
     try {
       const videoTasks = filterTasksByKind(
-        await fetchPendingGenerationTasks(200),
+        await fetchPendingGenerationTasks(50),
         'video'
       ).map(
         (task) =>

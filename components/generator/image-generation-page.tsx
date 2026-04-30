@@ -157,18 +157,26 @@ export function ImageGenerationPage({
     };
   }, []);
 
+  const modelsCacheRef = useRef<SafeImageModel[] | null>(null);
+
   useEffect(() => {
     if (!isActive || modelsLoaded) {
       return;
     }
 
     const loadModels = async () => {
+      if (modelsCacheRef.current) {
+        setAvailableModels(modelsCacheRef.current);
+        setModelsLoaded(true);
+        return;
+      }
       try {
         const res = await fetch('/api/image-models');
         if (!res.ok) return;
 
         const data = await res.json();
         const models = data.data?.models || [];
+        modelsCacheRef.current = models;
         setAvailableModels(models);
 
         if (models.length > 0) {
@@ -291,7 +299,7 @@ export function ImageGenerationPage({
 
   const loadRecentGenerations = useCallback(async () => {
     try {
-      const recentGenerations = await fetchRecentUserGenerations(24);
+      const recentGenerations = await fetchRecentUserGenerations(12);
       const completedImageGenerations = filterGenerationsByKind(
         recentGenerations.filter(
           (generation) =>
@@ -385,7 +393,7 @@ export function ImageGenerationPage({
   const loadPendingTasks = useCallback(async () => {
     try {
       const imageTasks = filterTasksByKind(
-        await fetchPendingGenerationTasks(200),
+        await fetchPendingGenerationTasks(50),
         'image'
       ).map(
         (task) =>

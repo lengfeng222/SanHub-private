@@ -1253,6 +1253,19 @@ export async function deleteAllUserGenerations(userId: string): Promise<number> 
   return (result as any).affectedRows || 0;
 }
 
+// 清空用户所有失败的生成记录
+export async function deleteAllFailedGenerations(userId: string): Promise<number> {
+  await initializeDatabase();
+  const db = getAdapter();
+
+  const [result] = await db.execute(
+    `DELETE FROM generations WHERE user_id = ? AND status IN ('failed', 'cancelled')`,
+    [userId]
+  );
+
+  return (result as any).affectedRows || 0;
+}
+
 // 获取用户今日使用量统计
 export interface DailyUsageStats {
   imageCount: number;

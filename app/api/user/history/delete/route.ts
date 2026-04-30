@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { deleteGeneration, deleteGenerations, deleteAllUserGenerations } from '@/lib/db';
+import { deleteGeneration, deleteGenerations, deleteAllUserGenerations, deleteAllFailedGenerations } from '@/lib/db';
 import { checkRateLimit, RateLimitConfig } from '@/lib/rate-limit';
 
 export async function POST(request: NextRequest) {
@@ -50,6 +50,11 @@ export async function POST(request: NextRequest) {
       case 'all':
         // 清空所有
         deletedCount = await deleteAllUserGenerations(session.user.id);
+        break;
+
+      case 'all-errors':
+        // 清空所有失败记录
+        deletedCount = await deleteAllFailedGenerations(session.user.id);
         break;
 
       default:

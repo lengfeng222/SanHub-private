@@ -314,7 +314,7 @@ export default function HistoryPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<'single' | 'batch' | 'all-media' | 'all-characters' | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<'single' | 'batch' | 'all-media' | 'all-characters' | 'all-errors' | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [unwatermarking, setUnwatermarking] = useState(false);
   const [unwatermarkUrl, setUnwatermarkUrl] = useState<string | null>(null);
@@ -439,7 +439,10 @@ export default function HistoryPage() {
     }
   }, []);
 
+  const modelCatalogsLoadedRef = useRef(false);
+
   const loadModelCatalogs = useCallback(async () => {
+    if (modelCatalogsLoadedRef.current) return;
     try {
       const [videoRes, imageRes] = await Promise.all([
         fetch('/api/video-models'),
@@ -455,6 +458,7 @@ export default function HistoryPage() {
         const imageData = await imageRes.json();
         setImageModels(imageData.data?.models || []);
       }
+      modelCatalogsLoadedRef.current = true;
     } catch (err) {
       console.error('Failed to load model catalogs:', err);
     }
@@ -540,7 +544,7 @@ export default function HistoryPage() {
 
   const loadPendingTasks = useCallback(async () => {
     try {
-      const tasks: Task[] = (await fetchPendingGenerationTasks(200)).map((task) => ({
+      const tasks: Task[] = (await fetchPendingGenerationTasks(50)).map((task) => ({
         id: task.id,
         prompt: task.prompt,
         type: task.type,
@@ -684,6 +688,32 @@ export default function HistoryPage() {
     }
   };
 
+  // 删除失败记录
+  const handleDeleteFailed = async () => {
+    setDeleting(true);
+    try {
+      const res = await fetch('/api/user/history/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'all-errors' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      toast({ title: '清除成功', description: `已删除 ${data.deletedCount} 条失败记录` });
+      setPage(1);
+      loadHistory(1);
+    } catch (error) {
+      toast({
+        title: '清除失败',
+        description: error instanceof Error ? error.message : '清除失败',
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleting(false);
+      setShowDeleteConfirm(null);
+    }
+  };
+
   // 删除媒体文件
   const handleDeleteMedia = async (action: 'single' | 'batch' | 'all', id?: string) => {
     setDeleting(true);
@@ -782,15 +812,23 @@ export default function HistoryPage() {
 
   
   // 缓存已完成作品的过滤结果
-  const completedGenerations = useMemo(() => 
-    generations.filter(g => 
-      g.resultUrl && 
-      g.status !== 'pending' && 
+  const completedGenerations = useMemo(() =>
+    generations.filter(g =>
+      g.resultUrl &&
+      g.status !== 'pending' &&
       g.status !== 'processing'
-    ), 
+    ),
     [generations]
   );
-  
+
+  // 缓存失败/取消的记录
+  const failedGenerations = useMemo(() =>
+    generations.filter(g =>
+      g.status === 'failed' || g.status === 'cancelled'
+    ),
+    [generations]
+  );
+
   // 缓存过滤后的作品列表
   const filteredGenerations = useMemo(() => {
     if (filter === 'all') return completedGenerations;
@@ -826,7 +864,8 @@ export default function HistoryPage() {
     videos: completedGenerations.filter(g => isVideoType(g)).length,
     images: completedGenerations.filter(g => !isVideoType(g)).length,
     characters: completedCharacterCards.length,
-  }), [completedGenerations, pendingTasks.length, completedCharacterCards.length]);
+    failed: failedGenerations.length,
+  }), [completedGenerations, pendingTasks.length, completedCharacterCards.length, failedGenerations.length]);
 
   return (
     <>
@@ -868,6 +907,15 @@ export default function HistoryPage() {
               <p className="text-xl lg:text-2xl font-light text-emerald-300">{stats.characters}</p>
               <p className="text-[10px] lg:text-xs text-foreground/40">角色卡</p>
             </div>
+            {stats.failed > 0 && (
+              <>
+                <div className="hidden lg:block w-px h-8 bg-card/70" />
+                <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
+                  <p className="text-xl lg:text-2xl font-light text-red-400">{stats.failed}</p>
+                  <p className="text-[10px] lg:text-xs text-foreground/40">失败</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -949,6 +997,16 @@ export default function HistoryPage() {
                   <User className="w-4 h-4" />
                   清空角色卡
                 </button>
+                {stats.failed > 0 && (
+                  <button
+                    onClick={() => setShowDeleteConfirm('all-errors')}
+                    disabled={deleting}
+                    className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-red-500/15 text-red-300 rounded-lg text-sm hover:bg-red-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <X className="w-4 h-4" />
+                    清除错误 ({stats.failed})
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -1132,150 +1190,16 @@ export default function HistoryPage() {
 
       {/* Lightbox */}
       {selected && (
-        <div
-          className="fixed inset-0 z-[60] bg-background/95 backdrop-blur-xl flex flex-col"
-          onClick={() => setSelected(null)}
-        >
-          {/* Media container - takes remaining space above info panel */}
-          <div className="flex-1 min-h-0 flex items-center justify-center p-4 md:p-6" onClick={(e) => e.stopPropagation()}>
-            {isVideoType(selected) ? (
-              <video
-                src={selected.resultUrl}
-                className="max-w-full max-h-full w-auto h-auto rounded-xl border border-border/70"
-                controls
-                autoPlay
-                loop
-              />
-            ) : (
-              <img
-                src={selected.resultUrl}
-                alt={selected.prompt}
-                className="max-w-full max-h-full w-auto h-auto rounded-xl border border-border/70 object-contain"
-              />
-            )}
-          </div>
-
-          {/* Info panel - fixed at bottom */}
-          <div className="shrink-0 w-full bg-background/80 backdrop-blur-sm border-t border-border/30 p-4 md:px-8 md:py-4" onClick={(e) => e.stopPropagation()}>
-            <div className="max-w-3xl mx-auto">
-              <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start gap-2">
-                    <div className="flex-1 min-w-0">
-                      {selected.prompt ? (
-                        <CollapsibleText text={selected.prompt} collapsedLines={2} />
-                      ) : (
-                        <p className="text-foreground text-sm leading-relaxed">无提示词</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 md:gap-3 mt-2">
-                    <span className="text-foreground/40 text-xs">{formatDate(selected.createdAt)}</span>
-                    <span className="text-foreground/30">·</span>
-                    <span className="text-foreground/40 text-xs">{selected.cost} 积分</span>
-                    <span className="text-foreground/30">·</span>
-                    <span className="px-2 py-0.5 bg-card/70 text-foreground/60 text-xs rounded">
-                      {resolveGenerationBadge(selected).label}
-                    </span>
-                    {selected.resultUrl && (
-                      <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(selected.resultUrl);
-                          toast({ title: '已复制 URL' });
-                        }}
-                        className="p-1 text-foreground/40 hover:text-foreground/80 rounded transition-colors"
-                        title="复制 URL"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                    {/* 调试信息: 显示 videoId 和 permalink 状态 */}
-                    {selected.type === 'sora-video' && process.env.NODE_ENV === 'development' && (
-                      <span className="text-[10px] text-foreground/30">
-                        {selected.params?.permalink ? '✓ permalink' : selected.params?.videoId ? '✓ videoId' : '✗ 无ID'}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2 shrink-0 w-full md:w-auto">
-                  {/* 显示 permalink 链接 - 仅 Sora 视频且有 permalink */}
-                  {selected.type === 'sora-video' && selected.params?.permalink && (
-                    <a
-                      href={selected.params.permalink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-center gap-2 px-4 py-2.5 bg-card/70 text-foreground border border-border/70 rounded-xl hover:bg-card/80 transition-colors text-sm font-medium"
-                      title="查看 Sora 分享页"
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                      分享页
-                    </a>
-                  )}
-                  
-                  {/* 去水印按钮 - 仅 Sora 视频,优先使用 permalink,否则尝试从 videoId 构建 */}
-                  {selected.type === 'sora-video' && (selected.params?.permalink || selected.params?.videoId) && (
-                    <button
-                      onClick={() => {
-                        // 优先使用 permalink,如果没有则尝试从 videoId 构建
-                        const permalink = selected.params?.permalink || 
-                          (selected.params?.videoId ? `https://sora.com/share/${selected.params.videoId}` : '');
-                        if (permalink) {
-                          handleUnwatermark(permalink);
-                        } else {
-                          toast({
-                            title: '无法去水印',
-                            description: '缺少视频分享链接和视频ID',
-                            variant: 'destructive',
-                          });
-                        }
-                      }}
-                      disabled={unwatermarking}
-                      className="flex items-center justify-center gap-2 px-4 py-2.5 bg-sky-500/20 text-sky-300 border border-sky-500/30 rounded-xl hover:bg-sky-500/30 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={selected.params?.permalink ? '重新获取无水印下载链接' : '尝试通过视频ID获取无水印链接'}
-                    >
-                      {unwatermarking ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Droplets className="w-4 h-4" />
-                      )}
-                      {unwatermarking ? '处理中...' : '去水印'}
-                    </button>
-                  )}
-                  
-                  {/* 下载无水印链接 */}
-                  {unwatermarkUrl && (
-                    <button
-                      onClick={() => downloadFile(unwatermarkUrl, selected.id, selected.type)}
-                      className="flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/30 transition-colors text-sm font-medium"
-                      title="下载无水印视频"
-                    >
-                      <Download className="w-4 h-4" />
-                      无水印下载
-                    </button>
-                  )}
-                  
-                  <button
-                    onClick={() => downloadFile(selected.resultUrl, selected.id, selected.type)}
-                    className="flex-1 md:flex-initial flex items-center justify-center gap-2 px-5 py-2.5 bg-foreground text-background rounded-xl hover:opacity-90 transition-colors text-sm font-medium"
-                  >
-                    <Download className="w-4 h-4" />
-                    下载
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSelected(null);
-                      setUnwatermarkUrl(null);
-                    }}
-                    className="flex items-center justify-center gap-2 px-5 py-2.5 bg-card/70 text-foreground border border-border/70 rounded-xl hover:bg-card/80 transition-colors text-sm font-medium"
-                  >
-                    <X className="w-4 h-4" />
-                    关闭
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <FullscreenViewer
+          generation={selected}
+          badge={resolveGenerationBadge(selected)}
+          isVideo={isVideoType(selected)}
+          unwatermarkUrl={unwatermarkUrl}
+          unwatermarking={unwatermarking}
+          onClose={() => { setSelected(null); setUnwatermarkUrl(null); }}
+          onDownload={(url, id, type) => downloadFile(url, id, type)}
+          onUnwatermark={(permalink) => handleUnwatermark(permalink)}
+        />
       )}
 
       {/* 删除确认弹窗 */}
@@ -1289,9 +1213,11 @@ export default function HistoryPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 mb-4">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${showDeleteConfirm === 'all-characters' ? 'bg-emerald-500/20' : 'bg-red-500/20'}`}>
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${showDeleteConfirm === 'all-characters' ? 'bg-emerald-500/20' : showDeleteConfirm === 'all-errors' ? 'bg-amber-500/20' : 'bg-red-500/20'}`}>
                 {showDeleteConfirm === 'all-characters' ? (
                   <User className="w-5 h-5 text-emerald-300" />
+                ) : showDeleteConfirm === 'all-errors' ? (
+                  <X className="w-5 h-5 text-amber-300" />
                 ) : (
                   <Trash2 className="w-5 h-5 text-red-300" />
                 )}
@@ -1301,10 +1227,11 @@ export default function HistoryPage() {
                 <p className="text-sm text-foreground/40">此操作无法撤销</p>
               </div>
             </div>
-            
+
             <p className="text-foreground/60 mb-6">
               {showDeleteConfirm === 'all-media' && '确定要清空所有已完成的媒体作品吗？进行中的任务不会被删除。'}
               {showDeleteConfirm === 'all-characters' && '确定要清空所有角色卡吗？'}
+              {showDeleteConfirm === 'all-errors' && `确定要清空所有 ${failedGenerations.length} 条失败记录吗？`}
               {showDeleteConfirm === 'batch' && `确定要删除选中的 ${selectedIds.size} 个作品吗？`}
               {showDeleteConfirm === 'single' && '确定要删除这个作品吗？'}
             </p>
@@ -1327,6 +1254,8 @@ export default function HistoryPage() {
                     handleDeleteMedia('all');
                   } else if (showDeleteConfirm === 'all-characters') {
                     handleDeleteCharacters();
+                  } else if (showDeleteConfirm === 'all-errors') {
+                    handleDeleteFailed();
                   }
                 }}
                 disabled={deleting}
@@ -1393,6 +1322,213 @@ function CharacterCardHistoryItem({ card }: { card: CharacterCard }) {
       <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/20 to-sky-500/20 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
         <div className="w-12 h-12 bg-card/70 backdrop-blur-sm rounded-full flex items-center justify-center">
           <User className="w-5 h-5 text-foreground" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ========================================
+// Fullscreen Viewer
+// ========================================
+function FullscreenViewer({
+  generation,
+  badge,
+  isVideo,
+  unwatermarkUrl,
+  unwatermarking,
+  onClose,
+  onDownload,
+  onUnwatermark,
+}: {
+  generation: Generation;
+  badge: Badge;
+  isVideo: boolean;
+  unwatermarkUrl: string | null;
+  unwatermarking: boolean;
+  onClose: () => void;
+  onDownload: (url: string, id: string, type: string) => void;
+  onUnwatermark: (permalink: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showPanel, setShowPanel] = useState(true);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const toggleFullscreen = useCallback(async () => {
+    if (!containerRef.current) return;
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else {
+      await containerRef.current.requestFullscreen();
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+      setShowPanel(true);
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  // 全屏后自动隐藏面板，鼠标移动时显示
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onMouseMove = () => {
+      setShowPanel(true);
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = setTimeout(() => setShowPanel(false), 2500);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    onMouseMove();
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      clearTimeout(hideTimerRef.current);
+    };
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.fullscreenElement) {
+        onClose();
+      }
+      if ((e.key === 'f' || e.key === 'F') && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose, toggleFullscreen]);
+
+  const gen = generation;
+
+  return (
+    <div
+      ref={containerRef}
+      className={`fixed inset-0 z-[60] flex flex-col ${isFullscreen ? 'bg-black' : 'bg-background/95 backdrop-blur-xl'}`}
+      onClick={onClose}
+    >
+      {/* 顶部工具栏 */}
+      <div className={`shrink-0 flex items-center justify-end gap-2 p-3 transition-opacity duration-300 ${
+        isFullscreen && !showPanel ? 'opacity-0 pointer-events-none' : 'opacity-100'
+      }`}>
+        <button
+          onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
+          className="p-2 text-foreground/50 hover:text-foreground rounded-lg hover:bg-card/70 transition-colors"
+          title={isFullscreen ? '退出全屏 (Ctrl+F)' : '全屏查看 (Ctrl+F)'}
+        >
+          <Maximize2 className="w-4 h-4" />
+        </button>
+        <button
+          onClick={onClose}
+          className="p-2 text-foreground/50 hover:text-foreground rounded-lg hover:bg-card/70 transition-colors"
+          title="关闭 (Esc)"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* Media */}
+      <div
+        className={`flex-1 min-h-0 flex items-center justify-center transition-all duration-300 ${
+          isFullscreen ? 'p-0' : 'p-4 md:p-6'
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {isVideo ? (
+          <video
+            src={gen.resultUrl}
+            className={`max-w-full max-h-full w-auto h-auto ${isFullscreen ? '' : 'rounded-xl border border-border/70'} object-contain`}
+            controls
+            autoPlay
+            loop
+          />
+        ) : (
+          <img
+            src={gen.resultUrl}
+            alt={gen.prompt}
+            className={`max-w-full max-h-full w-auto h-auto ${isFullscreen ? '' : 'rounded-xl border border-border/70'} object-contain`}
+          />
+        )}
+      </div>
+
+      {/* 信息面板 */}
+      <div
+        className={`shrink-0 w-full transition-all duration-300 ${
+          isFullscreen
+            ? showPanel
+              ? 'translate-y-0 opacity-100'
+              : 'translate-y-full opacity-0'
+            : 'translate-y-0 opacity-100'
+        } ${isFullscreen ? 'bg-black/80 backdrop-blur-sm' : 'bg-background/80 backdrop-blur-sm border-t border-border/30'}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="max-w-3xl mx-auto p-3 md:px-8 md:py-3">
+          <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <CollapsibleText text={gen.prompt || '无提示词'} collapsedLines={2} />
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                <span className="text-foreground/40 text-xs">{formatDate(gen.createdAt)}</span>
+                <span className="text-foreground/30">·</span>
+                <span className="text-foreground/40 text-xs">{gen.cost} 积分</span>
+                <span className="text-foreground/30">·</span>
+                <span className="px-2 py-0.5 bg-card/70 text-foreground/60 text-xs rounded">
+                  {badge.label}
+                </span>
+                {gen.resultUrl && (
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(gen.resultUrl); toast({ title: '已复制 URL' }); }}
+                    className="p-1 text-foreground/40 hover:text-foreground/80 rounded transition-colors"
+                    title="复制 URL"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 shrink-0 w-full md:w-auto">
+              {gen.type === 'sora-video' && gen.params?.permalink && (
+                <a href={gen.params.permalink} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-card/70 text-foreground border border-border/70 rounded-xl hover:bg-card/80 transition-colors text-xs font-medium">
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  分享页
+                </a>
+              )}
+              {gen.type === 'sora-video' && (gen.params?.permalink || gen.params?.videoId) && (
+                <button
+                  onClick={() => {
+                    const permalink = gen.params?.permalink ||
+                      (gen.params?.videoId ? `https://sora.com/share/${gen.params.videoId}` : '');
+                    if (permalink) onUnwatermark(permalink);
+                  }}
+                  disabled={unwatermarking}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-sky-500/20 text-sky-300 border border-sky-500/30 rounded-xl hover:bg-sky-500/30 transition-colors text-xs font-medium disabled:opacity-50"
+                >
+                  {unwatermarking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Droplets className="w-3.5 h-3.5" />}
+                  {unwatermarking ? '处理中...' : '去水印'}
+                </button>
+              )}
+              {unwatermarkUrl && (
+                <button
+                  onClick={() => onDownload(unwatermarkUrl, gen.id, gen.type)}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/30 transition-colors text-xs font-medium"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  无水印
+                </button>
+              )}
+              <button
+                onClick={() => onDownload(gen.resultUrl, gen.id, gen.type)}
+                className="flex items-center justify-center gap-2 px-5 py-2 bg-foreground text-background rounded-xl hover:opacity-90 transition-colors text-sm font-medium"
+              >
+                <Download className="w-3.5 h-3.5" />
+                下载
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
