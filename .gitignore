@@ -19,10 +19,9 @@ node_modules/
 # ===================
 # Docs
 # ===================
-CHANGELOG.md
-API_README.md
 OPENAI_API.md
 AGENTS.md
+
 # ===================
 # Testing
 # ===================
@@ -36,7 +35,6 @@ AGENTS.md
 .env.local
 .env.*.local
 !.env.example
-AGENTS.md
 # ===================
 # Database
 # ===================
