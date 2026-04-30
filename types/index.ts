@@ -95,6 +95,7 @@ export interface GenerationParams {
   duration?: string;
   videoConfigObject?: VideoConfigObject;
   imageSize?: string;
+  quality?: string;
   size?: string; // Z-Image 分辨率
   referenceImages?: string[]; // base64 数组
   loras?: string | Record<string, number>; // Z-Image LoRA 配置

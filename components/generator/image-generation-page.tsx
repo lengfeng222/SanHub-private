@@ -116,6 +116,7 @@ export function ImageGenerationPage({
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [aspectRatio, setAspectRatio] = useState<string>('1:1');
   const [imageSize, setImageSize] = useState<string>('1K');
+  const [quality, setQuality] = useState<string>('medium');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<Array<{ file: File; preview: string }>>([]);
   const [generations, setGenerations] = useState<Generation[]>([]);
@@ -570,6 +571,7 @@ export function ImageGenerationPage({
         prompt: taskPrompt,
         aspectRatio,
         imageSize: currentModel.features.imageSize ? imageSize : undefined,
+        quality: (currentModel.channelType === 'openai-compatible' || currentModel.channelType === 'openai-chat') ? quality : undefined,
         images: compressedImages || [],
         referenceImageUrl: externalReference?.sourceUrl,
       }),
@@ -818,6 +820,21 @@ export function ImageGenerationPage({
 
             {currentModel && (
               <span className="text-xs text-foreground/40">{getCurrentResolutionDisplay()}</span>
+            )}
+
+            {currentModel && (currentModel.channelType === 'openai-compatible' || currentModel.channelType === 'openai-chat') && (
+              <div className="w-[100px]">
+                <CustomSelect
+                  value={quality}
+                  onValueChange={setQuality}
+                  options={[
+                    { value: 'low', label: '低 low' },
+                    { value: 'medium', label: '中 medium' },
+                    { value: 'high', label: '高 high' },
+                  ]}
+                  placeholder="画质"
+                />
+              </div>
             )}
 
             <InlineToggle

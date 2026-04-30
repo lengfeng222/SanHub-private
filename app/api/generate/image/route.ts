@@ -121,6 +121,7 @@ export async function POST(request: NextRequest) {
       prompt,
       aspectRatio,
       imageSize,
+      quality,
       images,
       referenceImages,
       referenceImageUrl,
@@ -231,6 +232,7 @@ export async function POST(request: NextRequest) {
       prompt: prompt || '',
       aspectRatio,
       imageSize,
+      quality: quality || undefined,
       images: imageList.length > 0 ? imageList : undefined,
     };
 
@@ -254,6 +256,7 @@ export async function POST(request: NextRequest) {
       modelId,
       aspectRatio,
       imageSize,
+      quality: quality || undefined,
       imageCount: imageList.length,
       progress: 0,
     };

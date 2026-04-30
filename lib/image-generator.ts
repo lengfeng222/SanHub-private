@@ -15,6 +15,7 @@ export interface ImageGenerateRequest {
   size?: string;
   aspectRatio?: string;
   imageSize?: string;
+  quality?: string;
   images?: Array<{ mimeType: string; data: string }>;
   idempotencyKey?: string;
 }
@@ -163,6 +164,19 @@ async function generateWithOpenAI(
       '2:3': '1024x1536',
     };
     payload.size = sizeMap[request.aspectRatio] || '1024x1024';
+  }
+
+  // quality (high / medium / low) — 部分上游代理支持
+  if (request.quality) {
+    payload.quality = request.quality;
+  }
+
+  // extra_body.google.image_config — 向上游透传 Gemini 原生参数
+  if (request.aspectRatio || request.imageSize) {
+    const googleConfig: Record<string, string> = {};
+    if (request.aspectRatio) googleConfig.aspect_ratio = request.aspectRatio;
+    if (request.imageSize) googleConfig.image_size = request.imageSize;
+    payload.extra_body = { google: { image_config: googleConfig } };
   }
 
   const imageInput = buildOpenAIImageInput(request.images);
