@@ -110,6 +110,7 @@ export interface GenerationParams {
   translatedPrompt?: string;
   processedPrompt?: string;
   progress?: number; // 生成进度 0-100
+  clientRequestId?: string;
 }
 
 // SORA 后台配置

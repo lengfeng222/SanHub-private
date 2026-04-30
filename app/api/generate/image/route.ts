@@ -11,6 +11,7 @@ import {
   getImageModelWithChannel,
   getSystemConfig,
   refundGenerationBalance,
+  getGenerationByClientRequestId,
 } from '@/lib/db';
 import { saveMediaAsync } from '@/lib/media-storage';
 import { checkRateLimit } from '@/lib/rate-limit';
@@ -22,6 +23,8 @@ export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const CLIENT_REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const imageTaskCreationPromises = new Map<string, Promise<Generation>>();
 const IMAGE_TYPE_BY_CHANNEL: Record<ChannelType, GenerationType> = {
   apexerapi: 'gemini-image',
   'openai-compatible': 'gemini-image',
@@ -33,6 +36,28 @@ const IMAGE_TYPE_BY_CHANNEL: Record<ChannelType, GenerationType> = {
   flow2api: 'gemini-image',
   grok2api: 'gemini-image',
 };
+
+class RouteResponseError extends Error {
+  constructor(public response: NextResponse) {
+    super('Route response');
+  }
+}
+
+function buildTaskResponse(generation: Generation, message: string) {
+  return NextResponse.json({
+    success: true,
+    data: {
+      id: generation.id,
+      status: generation.status,
+      type: generation.type,
+      message,
+    },
+  });
+}
+
+function throwRouteResponse(response: NextResponse): never {
+  throw new RouteResponseError(response);
+}
 
 // 后台处理任务
 async function processGenerationTask(
@@ -127,7 +152,14 @@ export async function POST(request: NextRequest) {
       images,
       referenceImages,
       referenceImageUrl,
+      clientRequestId: rawClientRequestId,
     } = body;
+    const clientRequestId =
+      typeof rawClientRequestId === 'string' ? rawClientRequestId.trim() : '';
+
+    if (clientRequestId && !CLIENT_REQUEST_ID_PATTERN.test(clientRequestId)) {
+      return NextResponse.json({ error: 'Invalid client request id' }, { status: 400 });
+    }
 
     await assertPromptsAllowed([prompt]);
 
@@ -161,158 +193,217 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '账号已被禁用' }, { status: 403 });
     }
 
-    // 检查余额
-    if (user.balance < model.costPerGeneration) {
-      return NextResponse.json(
-        { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
-        { status: 402 }
-      );
-    }
-
-    // 处理参考图
-    const origin = new URL(request.url).origin;
-    const imageList: Array<{ mimeType: string; data: string }> = [];
-
-    if (images && Array.isArray(images)) {
-      imageList.push(...images);
-    }
-
-    if (referenceImageUrl) {
-      const referenceImage = await fetchReferenceImage(referenceImageUrl, {
-        origin,
-        userId: session.user.id,
-        userRole: session.user.role,
-        maxBytes: MAX_REFERENCE_IMAGE_BYTES,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-      });
-      imageList.push({
-        mimeType: referenceImage.mimeType,
-        data: referenceImage.dataUrl,
-      });
-    }
-
-    if (referenceImages && Array.isArray(referenceImages)) {
-      for (const img of referenceImages) {
-        if (img.startsWith('data:')) {
-          const match = img.match(/^data:([^;]+);base64,(.+)$/);
-          if (match) {
-            imageList.push({ mimeType: match[1], data: img });
-          }
-        } else {
-          const referenceImage = await fetchReferenceImage(img, {
-            origin,
-            userId: session.user.id,
-            userRole: session.user.role,
-            maxBytes: MAX_REFERENCE_IMAGE_BYTES,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            },
-          });
-          imageList.push({
-            mimeType: referenceImage.mimeType,
-            data: referenceImage.dataUrl,
-          });
+    const creationKey = clientRequestId ? `${user.id}:${clientRequestId}` : '';
+    const pendingCreation = creationKey ? imageTaskCreationPromises.get(creationKey) : undefined;
+    if (pendingCreation) {
+      try {
+        const generation = await pendingCreation;
+        return buildTaskResponse(generation, '任务已存在，已复用当前任务');
+      } catch (error) {
+        if (error instanceof RouteResponseError) {
+          return error.response;
         }
+        throw error;
       }
     }
 
-    // 验证必须参考图
-    if (model.requiresReferenceImage && imageList.length === 0) {
-      return NextResponse.json({ error: '该模型需要上传参考图' }, { status: 400 });
+    if (clientRequestId) {
+      const existingGeneration = await getGenerationByClientRequestId(user.id, clientRequestId);
+      if (existingGeneration) {
+        return buildTaskResponse(existingGeneration, '任务已存在，已复用当前任务');
+      }
     }
 
-    // 验证提示词
-    if (!model.allowEmptyPrompt && !prompt && imageList.length === 0) {
-      return NextResponse.json({ error: '请输入提示词或上传参考图' }, { status: 400 });
+    const pendingCreationAfterLookup = creationKey
+      ? imageTaskCreationPromises.get(creationKey)
+      : undefined;
+    if (pendingCreationAfterLookup) {
+      try {
+        const generation = await pendingCreationAfterLookup;
+        return buildTaskResponse(generation, '任务已存在，已复用当前任务');
+      } catch (error) {
+        if (error instanceof RouteResponseError) {
+          return error.response;
+        }
+        throw error;
+      }
     }
 
-    // 构建请求
-    const generateRequest: ImageGenerateRequest = {
-      modelId,
-      prompt: prompt || '',
-      aspectRatio,
-      imageSize,
-      quality: quality || undefined,
-      images: imageList.length > 0 ? imageList : undefined,
-    };
-
-    try {
-      await updateUserBalance(user.id, -model.costPerGeneration, 'strict');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Insufficient balance';
-      if (message.includes('Insufficient balance')) {
-        return NextResponse.json(
-          { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
-          { status: 402 }
+    const createTask = async (): Promise<Generation> => {
+      // 检查余额
+      if (user.balance < model.costPerGeneration) {
+        throwRouteResponse(
+          NextResponse.json(
+            { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
+            { status: 402 }
+          )
         );
       }
-      throw err;
-    }
 
-    // 保存生成记录
-    let generation: Generation;
-    const generationParams: Generation['params'] = {
-      model: model.apiModel,
-      modelId,
-      aspectRatio,
-      imageSize,
-      quality: quality || undefined,
-      imageCount: imageList.length,
-      progress: 0,
+      // 处理参考图
+      const origin = new URL(request.url).origin;
+      const imageList: Array<{ mimeType: string; data: string }> = [];
+
+      if (images && Array.isArray(images)) {
+        imageList.push(...images);
+      }
+
+      if (referenceImageUrl) {
+        const referenceImage = await fetchReferenceImage(referenceImageUrl, {
+          origin,
+          userId: session.user.id,
+          userRole: session.user.role,
+          maxBytes: MAX_REFERENCE_IMAGE_BYTES,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+        });
+        imageList.push({
+          mimeType: referenceImage.mimeType,
+          data: referenceImage.dataUrl,
+        });
+      }
+
+      if (referenceImages && Array.isArray(referenceImages)) {
+        for (const img of referenceImages) {
+          if (img.startsWith('data:')) {
+            const match = img.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              imageList.push({ mimeType: match[1], data: img });
+            }
+          } else {
+            const referenceImage = await fetchReferenceImage(img, {
+              origin,
+              userId: session.user.id,
+              userRole: session.user.role,
+              maxBytes: MAX_REFERENCE_IMAGE_BYTES,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              },
+            });
+            imageList.push({
+              mimeType: referenceImage.mimeType,
+              data: referenceImage.dataUrl,
+            });
+          }
+        }
+      }
+
+      // 验证必须参考图
+      if (model.requiresReferenceImage && imageList.length === 0) {
+        throwRouteResponse(
+          NextResponse.json({ error: '该模型需要上传参考图' }, { status: 400 })
+        );
+      }
+
+      // 验证提示词
+      if (!model.allowEmptyPrompt && !prompt && imageList.length === 0) {
+        throwRouteResponse(
+          NextResponse.json({ error: '请输入提示词或上传参考图' }, { status: 400 })
+        );
+      }
+
+      // 构建请求
+      const generateRequest: ImageGenerateRequest = {
+        modelId,
+        prompt: prompt || '',
+        aspectRatio,
+        imageSize,
+        quality: quality || undefined,
+        images: imageList.length > 0 ? imageList : undefined,
+      };
+
+      try {
+        await updateUserBalance(user.id, -model.costPerGeneration, 'strict');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Insufficient balance';
+        if (message.includes('Insufficient balance')) {
+          throwRouteResponse(
+            NextResponse.json(
+              { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
+              { status: 402 }
+            )
+          );
+        }
+        throw err;
+      }
+
+      // 保存生成记录
+      let generation: Generation;
+      const generationParams: Generation['params'] = {
+        model: model.apiModel,
+        modelId,
+        aspectRatio,
+        imageSize,
+        quality: quality || undefined,
+        imageCount: imageList.length,
+        progress: 0,
+        clientRequestId: clientRequestId || undefined,
+      };
+
+      try {
+        generation = await saveGeneration({
+          userId: user.id,
+          type: IMAGE_TYPE_BY_CHANNEL[channel.type] || 'gemini-image',
+          prompt: prompt || '',
+          params: generationParams,
+          resultUrl: '',
+          cost: model.costPerGeneration,
+          status: 'pending',
+          balancePrecharged: true,
+          balanceRefunded: false,
+        });
+      } catch (saveErr) {
+        await updateUserBalance(user.id, model.costPerGeneration, 'strict').catch(refundErr => {
+          console.error('[API] Precharge rollback failed:', refundErr);
+        });
+        throw saveErr;
+      }
+
+      console.log('[API] 图像生成任务已创建:', {
+        id: generation.id,
+        modelId,
+        model: model.apiModel,
+        resolvedModel: resolvedTarget.model,
+        resolvedSize: resolvedTarget.size,
+      });
+
+      // 后台处理
+      processGenerationTask(
+        generation.id,
+        user.id,
+        {
+          ...generateRequest,
+          idempotencyKey: `sanhub-image-${clientRequestId || generation.id}`,
+        },
+        model.costPerGeneration,
+        generationParams,
+        origin
+      ).catch((err) => {
+        console.error('[API] 后台任务启动失败:', err);
+      });
+
+      return generation;
     };
 
-    try {
-      generation = await saveGeneration({
-        userId: user.id,
-        type: IMAGE_TYPE_BY_CHANNEL[channel.type] || 'gemini-image',
-        prompt: prompt || '',
-        params: generationParams,
-        resultUrl: '',
-        cost: model.costPerGeneration,
-        status: 'pending',
-        balancePrecharged: true,
-        balanceRefunded: false,
-      });
-    } catch (saveErr) {
-      await updateUserBalance(user.id, model.costPerGeneration, 'strict').catch(refundErr => {
-        console.error('[API] Precharge rollback failed:', refundErr);
-      });
-      throw saveErr;
+    const creationPromise = createTask();
+    if (creationKey) {
+      imageTaskCreationPromises.set(creationKey, creationPromise);
     }
 
-    console.log('[API] 图像生成任务已创建:', {
-      id: generation.id,
-      modelId,
-      model: model.apiModel,
-      resolvedModel: resolvedTarget.model,
-      resolvedSize: resolvedTarget.size,
-    });
-
-    // 后台处理
-    processGenerationTask(
-      generation.id,
-      user.id,
-      {
-        ...generateRequest,
-        idempotencyKey: `sanhub-image-${generation.id}`,
-      },
-      model.costPerGeneration,
-      generationParams,
-      origin
-    ).catch((err) => {
-      console.error('[API] 后台任务启动失败:', err);
-    });
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        id: generation.id,
-        status: 'pending',
-        message: '任务已创建，正在后台处理中',
-      },
-    });
+    try {
+      const generation = await creationPromise;
+      return buildTaskResponse(generation, '任务已创建，正在后台处理中');
+    } catch (error) {
+      if (error instanceof RouteResponseError) {
+        return error.response;
+      }
+      throw error;
+    } finally {
+      if (creationKey && imageTaskCreationPromises.get(creationKey) === creationPromise) {
+        imageTaskCreationPromises.delete(creationKey);
+      }
+    }
   } catch (error) {
     console.error('[API] Image generation error:', error);
 

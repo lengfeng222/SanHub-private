@@ -169,18 +169,19 @@ async function generateWithOpenAI(
   if (typeof payload.size === 'string') {
     payload.size = payload.size.replace(/×/g, 'x');
   }
-  console.log('[generateWithOpenAI] payload.size:', payload.size);
-
   // quality (high / medium / low) — 部分上游代理支持
   if (request.quality) {
     payload.quality = request.quality;
   }
 
-  // extra_body.google.image_config — 向上游透传 Gemini 原生参数
-  if (request.aspectRatio || request.imageSize) {
+  // Only send Gemini-style image_config when there is no explicit OpenAI size.
+  // Some compatible gateways derive low-res sizes from aspect_ratio and let it
+  // override the pixel size, e.g. 9:16 -> 720x1280.
+  const hasExplicitPixelSize = typeof payload.size === 'string' && isSizeValue(payload.size);
+  if (!hasExplicitPixelSize && request.imageSize) {
     const googleConfig: Record<string, string> = {};
     if (request.aspectRatio) googleConfig.aspect_ratio = request.aspectRatio;
-    if (request.imageSize) googleConfig.image_size = request.imageSize;
+    googleConfig.image_size = request.imageSize;
     payload.extra_body = { google: { image_config: googleConfig } };
   }
 
@@ -835,7 +836,7 @@ async function generateWithSora(
   const url = `${normalizedBaseUrl}/v1/images/generations`;
 
   const normalizedApiModel = (apiModel || '').trim().toLowerCase();
-  let model = !normalizedApiModel || normalizedApiModel.startsWith('sora-image')
+  const model = !normalizedApiModel || normalizedApiModel.startsWith('sora-image')
     ? 'gpt-image-2'
     : apiModel;
   let size = '1024x1024';
@@ -937,18 +938,6 @@ export async function generateImage(request: ImageGenerateRequest): Promise<Gene
     request.aspectRatio,
     request.imageSize
   );
-
-  console.log('[generateImage]', {
-    modelId: model.id,
-    apiModel: model.apiModel,
-    aspectRatio: request.aspectRatio,
-    imageSize: request.imageSize,
-    resolutions: model.resolutions,
-    resolvedModel: resolvedTarget.model,
-    resolvedSize: resolvedTarget.size,
-    usedModelFromMapping: resolvedTarget.usedModelFromMapping,
-    channelType: channel.type,
-  });
 
   let result: GenerateResult;
 

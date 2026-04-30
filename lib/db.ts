@@ -959,6 +959,46 @@ export async function saveGeneration(
   return gen;
 }
 
+export async function getGenerationByClientRequestId(
+  userId: string,
+  clientRequestId: string
+): Promise<Generation | null> {
+  await initializeDatabase();
+  const db = getAdapter();
+
+  const [rows] = await db.execute(
+    `SELECT * FROM generations
+     WHERE user_id = ? AND params LIKE ?
+     ORDER BY created_at DESC LIMIT 10`,
+    [userId, `%"clientRequestId":"${clientRequestId}"%`]
+  );
+
+  for (const row of rows as any[]) {
+    const params = typeof row.params === 'string' ? JSON.parse(row.params) : row.params;
+    if (params?.clientRequestId !== clientRequestId) {
+      continue;
+    }
+
+    return {
+      id: row.id,
+      userId: row.user_id,
+      type: row.type,
+      prompt: row.prompt,
+      params,
+      resultUrl: row.result_url,
+      cost: row.cost,
+      status: row.status || 'completed',
+      balancePrecharged: Boolean(row.balance_precharged),
+      balanceRefunded: Boolean(row.balance_refunded),
+      errorMessage: row.error_message || undefined,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at || row.created_at),
+    };
+  }
+
+  return null;
+}
+
 export async function updateGeneration(
   id: string,
   updates: Partial<Pick<Generation, 'status' | 'resultUrl' | 'errorMessage' | 'params' | 'balancePrecharged' | 'balanceRefunded'>>

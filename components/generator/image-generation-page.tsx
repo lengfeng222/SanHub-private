@@ -100,6 +100,7 @@ export function ImageGenerationPage({
   const refreshGenerationFeedRef = useRef<() => Promise<void>>(async () => {});
   const imagesRef = useRef<Array<{ file: File; preview: string }>>([]);
   const isActiveRef = useRef(isActive);
+  const submissionLockRef = useRef(false);
 
   const [availableModels, setAvailableModels] = useState<SafeImageModel[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -567,7 +568,8 @@ export function ImageGenerationPage({
 
   const submitSingleTask = async (
     taskPrompt: string,
-    compressedImages?: Array<{ mimeType: string; data: string }>
+    compressedImages: Array<{ mimeType: string; data: string }> | undefined,
+    clientRequestId: string
   ) => {
     if (!currentModel) throw new Error('请选择模型');
 
@@ -582,6 +584,7 @@ export function ImageGenerationPage({
         quality: (currentModel.channelType === 'apexerapi' || currentModel.channelType === 'openai-compatible' || currentModel.channelType === 'openai-chat') && currentModel.apiModel.toLowerCase().includes('gpt-image-2') && (!currentModel.features.qualityOptions || currentModel.features.qualityOptions.length === 0 || currentModel.features.qualityOptions.includes(quality)) ? quality : undefined,
         images: compressedImages || [],
         referenceImageUrl: externalReference?.sourceUrl,
+        clientRequestId,
       }),
     });
 
@@ -599,19 +602,31 @@ export function ImageGenerationPage({
       createdAt: Date.now(),
     };
 
-    setTasks((prev) => [newTask, ...prev]);
+    setTasks((prev) =>
+      prev.some((task) => task.id === newTask.id) ? prev : [newTask, ...prev]
+    );
     void pollTaskStatus(data.data.id, taskPrompt);
 
     return data.data.id;
   };
 
+  const createClientRequestId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  };
+
   const handleGenerate = async () => {
+    if (submissionLockRef.current) return;
+
     const validationError = validateInput();
     if (validationError) {
       setError(validationError);
       return;
     }
 
+    submissionLockRef.current = true;
     setError('');
     setSubmitting(true);
 
@@ -619,7 +634,7 @@ export function ImageGenerationPage({
 
     try {
       const compressedImages = await compressImagesIfNeeded();
-      await submitSingleTask(taskPrompt, compressedImages);
+      await submitSingleTask(taskPrompt, compressedImages, createClientRequestId());
 
       toast({
         title: '任务已提交',
@@ -636,17 +651,21 @@ export function ImageGenerationPage({
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败');
     } finally {
+      submissionLockRef.current = false;
       setSubmitting(false);
     }
   };
 
   const handleGachaMode = async () => {
+    if (submissionLockRef.current) return;
+
     const validationError = validateInput();
     if (validationError) {
       setError(validationError);
       return;
     }
 
+    submissionLockRef.current = true;
     setError('');
     setSubmitting(true);
 
@@ -654,9 +673,10 @@ export function ImageGenerationPage({
 
     try {
       const compressedImages = await compressImagesIfNeeded();
+      const batchRequestId = createClientRequestId();
 
       for (let index = 0; index < 3; index += 1) {
-        await submitSingleTask(taskPrompt, compressedImages);
+        await submitSingleTask(taskPrompt, compressedImages, `${batchRequestId}-${index}`);
       }
 
       toast({
@@ -674,6 +694,7 @@ export function ImageGenerationPage({
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败');
     } finally {
+      submissionLockRef.current = false;
       setSubmitting(false);
     }
   };
