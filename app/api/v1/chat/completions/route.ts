@@ -84,7 +84,7 @@ const MEDIA_URL_KEYS = [
   'file_uri',
 ];
 
-function isUsableMediaUrl(value: unknown): value is string {
+function isUsableMediaUrl(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
   return (
@@ -95,7 +95,46 @@ function isUsableMediaUrl(value: unknown): value is string {
   );
 }
 
+function pickMediaUrlFromString(value: string, depth: number): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  if (isUsableMediaUrl(trimmed)) {
+    return trimmed;
+  }
+
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const nested = pickMediaUrl(parsed, depth + 1);
+      if (nested) return nested;
+    } catch {
+      // Continue with pattern extraction below.
+    }
+  }
+
+  const keyedUrlMatch = trimmed.match(
+    /"(?:url|preview_url|previewUrl|image_url|imageUrl|video_url|videoUrl|fileUri|file_uri)"\s*:\s*"([^"]+)"/i
+  );
+  if (keyedUrlMatch && isUsableMediaUrl(keyedUrlMatch[1])) {
+    return keyedUrlMatch[1].trim();
+  }
+
+  const dataUrlMatch = trimmed.match(/data:(?:image|video)\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+  if (dataUrlMatch) {
+    return dataUrlMatch[0];
+  }
+
+  const directUrlMatch = trimmed.match(/https?:\/\/[^\s"'<>\])`]+/);
+  if (directUrlMatch && isUsableMediaUrl(directUrlMatch[0])) {
+    return directUrlMatch[0].trim();
+  }
+
+  return undefined;
+}
+
 function pickMediaUrl(value: unknown, depth = 0): string | undefined {
+  if (typeof value === 'string') return pickMediaUrlFromString(value, depth);
   if (!value || typeof value !== 'object' || depth > 6) return undefined;
 
   if (Array.isArray(value)) {
@@ -108,8 +147,9 @@ function pickMediaUrl(value: unknown, depth = 0): string | undefined {
 
   const record = value as Record<string, unknown>;
   for (const key of MEDIA_URL_KEYS) {
-    if (isUsableMediaUrl(record[key])) {
-      return record[key].trim();
+    const candidate = record[key];
+    if (typeof candidate === 'string' && isUsableMediaUrl(candidate)) {
+      return candidate.trim();
     }
   }
 
@@ -137,16 +177,14 @@ function pickMediaUrl(value: unknown, depth = 0): string | undefined {
   }
 
   for (const [key, candidate] of Object.entries(record)) {
-    if (/url|uri/i.test(key) && isUsableMediaUrl(candidate)) {
+    if (/url|uri/i.test(key) && typeof candidate === 'string' && isUsableMediaUrl(candidate)) {
       return candidate.trim();
     }
   }
 
   for (const candidate of Object.values(record)) {
-    if (candidate && typeof candidate === 'object') {
-      const nested = pickMediaUrl(candidate, depth + 1);
-      if (nested) return nested;
-    }
+    const nested = pickMediaUrl(candidate, depth + 1);
+    if (nested) return nested;
   }
 
   return undefined;

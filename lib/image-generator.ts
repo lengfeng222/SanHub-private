@@ -102,7 +102,7 @@ const IMAGE_URL_KEYS = [
   'file_uri',
 ];
 
-function isUsableImageUrl(value: unknown): value is string {
+function isUsableImageUrl(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
   return (
@@ -112,7 +112,46 @@ function isUsableImageUrl(value: unknown): value is string {
   );
 }
 
+function pickImageUrlFromString(value: string, depth: number): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  if (isUsableImageUrl(trimmed)) {
+    return trimmed;
+  }
+
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const nested = pickImageUrl(parsed, depth + 1);
+      if (nested) return nested;
+    } catch {
+      // Continue with pattern extraction below.
+    }
+  }
+
+  const keyedUrlMatch = trimmed.match(
+    /"(?:url|preview_url|previewUrl|image_url|imageUrl|output_url|outputUrl|fileUri|file_uri)"\s*:\s*"([^"]+)"/i
+  );
+  if (keyedUrlMatch && isUsableImageUrl(keyedUrlMatch[1])) {
+    return keyedUrlMatch[1].trim();
+  }
+
+  const dataUrlMatch = trimmed.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+  if (dataUrlMatch) {
+    return dataUrlMatch[0];
+  }
+
+  const directUrlMatch = trimmed.match(/https?:\/\/[^\s"'<>\])`]+/);
+  if (directUrlMatch && isUsableImageUrl(directUrlMatch[0])) {
+    return directUrlMatch[0].trim();
+  }
+
+  return undefined;
+}
+
 function pickImageUrl(value: unknown, depth = 0): string | undefined {
+  if (typeof value === 'string') return pickImageUrlFromString(value, depth);
   if (!value || typeof value !== 'object' || depth > 6) return undefined;
 
   if (Array.isArray(value)) {
@@ -125,8 +164,9 @@ function pickImageUrl(value: unknown, depth = 0): string | undefined {
 
   const record = value as Record<string, unknown>;
   for (const key of IMAGE_URL_KEYS) {
-    if (isUsableImageUrl(record[key])) {
-      return record[key].trim();
+    const candidate = record[key];
+    if (typeof candidate === 'string' && isUsableImageUrl(candidate)) {
+      return candidate.trim();
     }
   }
 
@@ -152,16 +192,14 @@ function pickImageUrl(value: unknown, depth = 0): string | undefined {
   }
 
   for (const [key, candidate] of Object.entries(record)) {
-    if (/url|uri/i.test(key) && isUsableImageUrl(candidate)) {
+    if (/url|uri/i.test(key) && typeof candidate === 'string' && isUsableImageUrl(candidate)) {
       return candidate.trim();
     }
   }
 
   for (const candidate of Object.values(record)) {
-    if (candidate && typeof candidate === 'object') {
-      const nested = pickImageUrl(candidate, depth + 1);
-      if (nested) return nested;
-    }
+    const nested = pickImageUrl(candidate, depth + 1);
+    if (nested) return nested;
   }
 
   return undefined;
