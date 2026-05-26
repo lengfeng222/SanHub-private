@@ -21,6 +21,12 @@ export type PendingGenerationTask = {
   errorMessage?: string;
   createdAt: number;
   updatedAt?: number;
+  upstreamTaskId?: string;
+  upstreamStatus?: string;
+  upstreamState?: string;
+  upstreamStatusGroup?: string;
+  upstreamProgress?: number;
+  upstreamUpdatedAt?: number;
 };
 
 export type ReusableImageReference = {
@@ -223,6 +229,18 @@ export function buildTaskFromGeneration(generation: Generation): PendingGenerati
         : undefined,
     modelId: generation.params?.modelId,
     model: generation.params?.model,
+    upstreamTaskId: generation.params?.upstreamTaskId,
+    upstreamStatus: generation.params?.upstreamStatus,
+    upstreamState: generation.params?.upstreamState,
+    upstreamStatusGroup: generation.params?.upstreamStatusGroup,
+    upstreamProgress:
+      typeof generation.params?.upstreamProgress === 'number'
+        ? generation.params.upstreamProgress
+        : undefined,
+    upstreamUpdatedAt:
+      typeof generation.params?.upstreamUpdatedAt === 'number'
+        ? generation.params.upstreamUpdatedAt
+        : undefined,
     errorMessage:
       generation.errorMessage ||
       (status === 'cancelled' ? '任务已取消' : '生成失败'),

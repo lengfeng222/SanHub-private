@@ -5,16 +5,16 @@ export async function getPublicSiteConfig(): Promise<ExtendedSiteConfig> {
   const config = await getSystemConfig();
 
   return {
-    siteName: config.siteConfig?.siteName || 'SANHUB',
-    siteTagline: config.siteConfig?.siteTagline || 'Let Imagination Come Alive',
-    siteDescription: config.siteConfig?.siteDescription || '「SANHUB」是专为 AI 创作打造的一站式平台',
+    siteName: config.siteConfig?.siteName || '幻途',
+    siteTagline: config.siteConfig?.siteTagline || '幻途 AI 内容创作平台',
+    siteDescription: config.siteConfig?.siteDescription || '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
     siteSubDescription:
       config.siteConfig?.siteSubDescription ||
-      '我们融合了 Sora 视频生成、Gemini 图像创作与多模型 AI 对话。在这里，技术壁垒已然消融，你唯一的使命就是释放纯粹的想象。',
-    contactEmail: config.siteConfig?.contactEmail || 'support@sanhub.com',
-    copyright: config.siteConfig?.copyright || 'Copyright © 2025 SANHUB',
-    poweredBy: config.siteConfig?.poweredBy || 'Powered by OpenAI Sora & Google Gemini',
-    defaultBalance: config.defaultBalance ?? 100,
+      '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+    contactEmail: config.siteConfig?.contactEmail || 'support@aigcone.cn',
+    copyright: config.siteConfig?.copyright || '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
+    poweredBy: config.siteConfig?.poweredBy || '幻途 · Huantu AI',
+    defaultBalance: config.defaultBalance ?? 50,
     squareEnabled: config.featureFlags?.squareEnabled ?? true,
     gachaEnabled: config.featureFlags?.gachaEnabled ?? true,
     characterCardEnabled: config.featureFlags?.characterCardEnabled ?? true,

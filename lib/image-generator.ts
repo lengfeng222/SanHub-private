@@ -1059,6 +1059,124 @@ async function generateWithSora(
   };
 }
 
+async function pollLingkeMediaImageTask(
+  baseUrl: string,
+  apiKey: string,
+  channelId: string,
+  taskId: string
+): Promise<any> {
+  const statusUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/status?task_id=${encodeURIComponent(taskId)}`;
+
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const key = getNextApiKey(apiKey, channelId);
+    const response = await fetchWithRetry(undiciFetch, statusUrl, () => ({
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${key}`,
+      },
+      dispatcher: imageAgent,
+    }));
+
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`灵刻媒体查询失败 (${response.status})`);
+    }
+
+    const imageUrl = pickImageUrl(data?.data) || pickImageUrl(data);
+    if (Number(data?.code ?? 0) === 200 && imageUrl) {
+      return data;
+    }
+
+    const status = String(data?.data?.status || data?.status || '').toLowerCase();
+    if (status === 'failed' || status === 'error' || status === 'cancelled') {
+      throw new Error(String(data?.data?.msg || data?.msg || '灵刻媒体任务失败'));
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+
+  throw new Error('灵刻媒体图片任务超时');
+}
+
+async function generateWithLingkeMedia(
+  request: ImageGenerateRequest,
+  baseUrl: string,
+  apiKey: string,
+  apiModel: string,
+  channelId: string
+): Promise<GenerateResult> {
+  const key = getNextApiKey(apiKey, channelId);
+  const apiUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/generate`;
+
+  const params: Record<string, unknown> = {
+    quality: (request.quality || 'hd').trim() || 'hd',
+    aspect_ratio: request.aspectRatio || '1:1',
+  };
+
+  if (request.size) params.size = request.size;
+  if (request.imageSize) params.image_size = request.imageSize;
+
+  if (request.images && request.images.length > 0) {
+    params.images = request.images.map((image) =>
+      image.data.startsWith('data:')
+        ? image.data
+        : `data:${image.mimeType || 'image/jpeg'};base64,${image.data.replace(/^data:[^;]+;base64,/, '')}`
+    );
+  }
+
+  const response = await fetchWithRetry(undiciFetch, apiUrl, () => ({
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(request.idempotencyKey
+        ? {
+            'Idempotency-Key': request.idempotencyKey,
+            'X-Idempotency-Key': request.idempotencyKey,
+          }
+        : {}),
+    },
+    body: JSON.stringify({
+      model: apiModel,
+      prompt: request.prompt,
+      params,
+    }),
+    dispatcher: imageAgent,
+  }), GENERATION_POST_RETRY_OPTIONS);
+
+  const data: any = await response.json().catch(() => ({}));
+  if (!response.ok || Number(data?.code ?? 0) !== 200) {
+    const detail = String(data?.msg || data?.data?.详情 || data?.data?.msg || '生成失败');
+    throw new Error(`灵刻媒体图片生成失败${response.ok ? '' : ` (${response.status})`}: ${detail}`);
+  }
+
+  const directUrl = pickImageUrl(data?.data) || pickImageUrl(data);
+  if (directUrl) {
+    return {
+      type: 'gemini-image',
+      url: directUrl,
+      cost: 0,
+    };
+  }
+
+  const taskId = data?.data?.task_id || data?.data?.taskId;
+  if (!taskId) {
+    throw new Error('灵刻媒体未返回任务 ID');
+  }
+
+  const finalData = await pollLingkeMediaImageTask(baseUrl, apiKey, channelId, String(taskId));
+  const resultUrl = pickImageUrl(finalData?.data) || pickImageUrl(finalData);
+  if (!resultUrl) {
+    throw new Error('灵刻媒体任务完成但未返回图片');
+  }
+
+  return {
+    type: 'gemini-image',
+    url: resultUrl,
+    cost: 0,
+  };
+}
+
 // ========================================
 // 统一入口
 // ========================================
@@ -1153,6 +1271,16 @@ export async function generateImage(request: ImageGenerateRequest): Promise<Gene
         effectiveBaseUrl,
         effectiveApiKey,
         model.apiModel,
+        channel.id
+      );
+      break;
+
+    case 'lingke-media':
+      result = await generateWithLingkeMedia(
+        request,
+        effectiveBaseUrl,
+        effectiveApiKey,
+        resolvedTarget.model,
         channel.id
       );
       break;

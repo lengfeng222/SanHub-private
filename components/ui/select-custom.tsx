@@ -29,12 +29,25 @@ export function CustomSelect({
   disabled = false,
 }: CustomSelectProps) {
   const selectedOption = options.find((opt) => opt.value === value);
+  const renderPreview = (icon?: React.ReactNode, compact = false) => {
+    if (!icon) return null;
+    return (
+      <span
+        className={cn(
+          'flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-white/10 bg-white/5',
+          compact ? 'h-7 w-11' : 'h-10 w-16'
+        )}
+      >
+        {icon}
+      </span>
+    );
+  };
 
   return (
     <SelectPrimitive.Root value={value} onValueChange={onValueChange} disabled={disabled}>
       <SelectPrimitive.Trigger
         className={cn(
-          "flex items-center justify-between w-full px-3 py-2 text-sm bg-card/60 border rounded-lg transition-all outline-none focus:ring-2 focus:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50",
+          "flex min-h-[48px] w-full items-center justify-between gap-2 rounded-lg border bg-card/60 px-3 py-2 text-sm transition-all outline-none focus:ring-2 focus:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50",
           selectedOption?.highlight 
             ? "border-sky-500/50 hover:border-sky-500/70 shadow-[0_0_10px_rgba(14,165,233,0.1)]" 
             : "border-border/70 hover:border-border hover:bg-card/80",
@@ -43,10 +56,18 @@ export function CustomSelect({
       >
         <SelectPrimitive.Value placeholder={placeholder}>
           {selectedOption && (
-            <div className="flex flex-col items-start text-left leading-tight">
-              <span className={cn("font-medium block truncate", selectedOption.highlight && "text-sky-400")}>
-                {selectedOption.label}
-              </span>
+            <div className="flex min-w-0 items-center gap-2">
+              {renderPreview(selectedOption.icon, true)}
+              <div className="min-w-0 flex-1 text-left leading-tight">
+                <span className={cn("block truncate font-medium", selectedOption.highlight && "text-sky-400")}>
+                  {selectedOption.label}
+                </span>
+                {selectedOption.description ? (
+                  <span className="block truncate text-[11px] text-foreground/45">
+                    {selectedOption.description}
+                  </span>
+                ) : null}
+              </div>
             </div>
           )}
         </SelectPrimitive.Value>
@@ -67,22 +88,26 @@ export function CustomSelect({
                 key={option.value}
                 value={option.value}
                 className={cn(
-                  "relative flex flex-col w-full cursor-default select-none rounded-md py-2 pl-3 pr-9 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+                  "relative flex w-full cursor-default select-none rounded-md py-2.5 pl-2.5 pr-9 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
                   option.highlight && "bg-sky-500/5 focus:bg-sky-500/10"
                 )}
               >
-                <div className="flex items-center gap-2">
-                  {option.highlight && <Sparkles className="w-3.5 h-3.5 text-sky-400 shrink-0" />}
-                  <span className={cn("font-medium", option.highlight && "text-sky-400")}>
-                    {option.label}
-                  </span>
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  {renderPreview(option.icon)}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      {option.highlight && <Sparkles className="h-3.5 w-3.5 shrink-0 text-sky-400" />}
+                      <span className={cn("truncate font-medium", option.highlight && "text-sky-400")}>
+                        {option.label}
+                      </span>
+                    </div>
+                    {option.description && (
+                      <span className="mt-0.5 block truncate text-xs text-foreground/50">
+                        {option.description}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                
-                {option.description && (
-                  <span className="text-xs text-foreground/50 mt-0.5 line-clamp-1 block">
-                    {option.description}
-                  </span>
-                )}
 
                 <span className="absolute right-2 top-2.5 flex h-3.5 w-3.5 items-center justify-center">
                   <SelectPrimitive.ItemIndicator>

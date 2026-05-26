@@ -10,7 +10,6 @@ import {
   Menu,
   X,
   Megaphone,
-  Sparkles,
   MessageSquare,
   Globe,
   Image,
@@ -21,6 +20,7 @@ import {
   UserPlus
 } from 'lucide-react';
 import { useState } from 'react';
+import { BrandMark } from '@/components/brand/brand-mark';
 import { cn } from '@/lib/utils';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
 import type { UserRole } from '@/types';
@@ -70,12 +70,10 @@ export function AdminSidebar() {
           <span>返回首页</span>
         </Link>
         <div className="flex items-center gap-3 mt-4">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500/25 to-emerald-500/25 border border-border/70 flex items-center justify-center">
-            <Sparkles className="w-5 h-5 text-foreground/80" />
-          </div>
+          <BrandMark size={40} rounded="rounded-xl" className="border-white/12" />
           <div>
-            <h1 className="text-lg font-semibold text-foreground">管理后台</h1>
-            <p className="text-xs text-foreground/40">{siteConfig.siteName} Admin</p>
+            <h1 className="text-lg font-semibold text-foreground">{siteConfig.siteName} 管理台</h1>
+            <p className="text-xs text-foreground/40">Admin Console</p>
           </div>
         </div>
       </div>

@@ -10,6 +10,18 @@ import {
 } from '@/lib/db';
 import type { VideoConfigObject } from '@/types';
 
+function normalizeExtraParams(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+
+  try {
+    const cloned = JSON.parse(JSON.stringify(raw)) as unknown;
+    if (!cloned || typeof cloned !== 'object' || Array.isArray(cloned)) return undefined;
+    return Object.keys(cloned).length > 0 ? (cloned as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeVideoConfigObject(raw: unknown): VideoConfigObject | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
 
@@ -26,14 +38,14 @@ function normalizeVideoConfigObject(raw: unknown): VideoConfigObject | undefined
 
   const videoLengthRaw = source.video_length;
   if (typeof videoLengthRaw === 'number' && Number.isFinite(videoLengthRaw)) {
-    const seconds = Math.max(5, Math.min(30, Math.floor(videoLengthRaw)));
+    const seconds = Math.max(1, Math.min(30, Math.floor(videoLengthRaw)));
     config.video_length = seconds;
   }
 
   const resolutionRaw = source.resolution;
   if (typeof resolutionRaw === 'string') {
     const resolution = resolutionRaw.trim().toUpperCase();
-    if (resolution === 'SD' || resolution === 'HD') {
+    if (resolution) {
       config.resolution = resolution;
     }
   }
@@ -44,6 +56,35 @@ function normalizeVideoConfigObject(raw: unknown): VideoConfigObject | undefined
     if (preset === 'fun' || preset === 'normal' || preset === 'spicy') {
       config.preset = preset;
     }
+  }
+
+  const generationModeRaw = source.generation_mode;
+  if (typeof generationModeRaw === 'string' && generationModeRaw.trim()) {
+    config.generation_mode = generationModeRaw.trim();
+  }
+
+  if (typeof source.off_peak === 'boolean') {
+    config.off_peak = source.off_peak;
+  }
+
+  const qualityVersionRaw = source.quality_version;
+  if (typeof qualityVersionRaw === 'string' && qualityVersionRaw.trim()) {
+    config.quality_version = qualityVersionRaw.trim();
+  }
+
+  const modelVersionRaw = source.model_version;
+  if (typeof modelVersionRaw === 'string' && modelVersionRaw.trim()) {
+    config.model_version = modelVersionRaw.trim();
+  }
+
+  const versionRaw = source.version;
+  if (typeof versionRaw === 'string' && versionRaw.trim()) {
+    config.version = versionRaw.trim();
+  }
+
+  const extraParams = normalizeExtraParams(source.extra_params);
+  if (extraParams) {
+    config.extra_params = extraParams;
   }
 
   return Object.keys(config).length > 0 ? config : undefined;
@@ -80,7 +121,7 @@ export async function POST(request: NextRequest) {
     const {
       channelId, name, description, apiModel, baseUrl, apiKey,
       features, aspectRatios, durations,
-      defaultAspectRatio, defaultDuration, videoConfigObject, highlight, enabled, sortOrder,
+      defaultAspectRatio, defaultDuration, videoConfigObject, highlight, enabled, billingMode, billingPrice, billingUnit, imageUrl, sortOrder,
     } = body;
 
     if (!channelId || !name || !apiModel) {
@@ -112,6 +153,10 @@ export async function POST(request: NextRequest) {
       videoConfigObject: normalizeVideoConfigObject(videoConfigObject),
       highlight: highlight || false,
       enabled: enabled !== false,
+      billingMode: billingMode || 'per_second',
+      billingPrice: billingPrice ?? 12,
+      billingUnit: billingUnit || 1,
+      imageUrl: imageUrl || undefined,
       sortOrder: sortOrder || 0,
     });
 

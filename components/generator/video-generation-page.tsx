@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
 import { toast } from '@/components/ui/toaster';
 import { CustomSelect } from '@/components/ui/select-custom';
+import { ModelPreview, getVideoModelPreviewMeta } from '@/components/model/model-preview';
 import { InlineToggle } from '@/components/generator/inline-toggle';
 import { ReferenceImageInput } from '@/components/generator/reference-image-input';
 import type { Task } from '@/components/generator/result-gallery';
@@ -37,6 +38,7 @@ import {
   replaceActiveTasks,
   type ReusableImageReference,
 } from '@/lib/generation-client';
+import { resolveVideoModelLabel } from '@/lib/video-model-label';
 
 const ResultGallery = dynamic(
   () => import('@/components/generator/result-gallery').then((mod) => mod.ResultGallery),
@@ -153,6 +155,10 @@ export function VideoGenerationView({
   const currentModel = useMemo(() => {
     return availableModels.find(m => m.id === selectedModelId) || availableModels[0];
   }, [availableModels, selectedModelId]);
+  const videoModelMap = useMemo(
+    () => new Map(availableModels.map((item) => [item.id, item.name])),
+    [availableModels]
+  );
   const isSoraChannel = currentModel?.channelType === 'sora';
   const canMentionCharacterCards = isSoraChannel && characterCards.length > 0;
 
@@ -368,9 +374,20 @@ export function VideoGenerationView({
     try {
       const recentGenerations = await fetchRecentUserGenerations(12);
       const videoGenerations = filterGenerationsByKind(recentGenerations, 'video');
+      const activeVideoTasks = videoGenerations
+        .filter(
+          (generation) =>
+            generation.status === 'pending' || generation.status === 'processing'
+        )
+        .map(
+          (generation) =>
+            ({
+              ...buildTaskFromGeneration(generation),
+              persisted: true,
+            }) satisfies Task
+        );
       const completedVideoGenerations = videoGenerations.filter(
         (generation) =>
-          generation.resultUrl &&
           generation.status === 'completed' &&
           isTerminalGenerationStatus(generation.status)
       );
@@ -387,6 +404,9 @@ export function VideoGenerationView({
       setGenerations((prev) =>
         mergeGenerationsById(prev, completedVideoGenerations)
       );
+      if (activeVideoTasks.length > 0) {
+        setTasks((prev) => mergeTasksById(prev, activeVideoTasks));
+      }
       if (failedVideoTasks.length > 0) {
         setTasks((prev) => mergeTasksById(prev, failedVideoTasks));
       }
@@ -482,6 +502,37 @@ export function VideoGenerationView({
                         typeof payload.progress === 'number'
                           ? payload.progress
                           : task.progress,
+                      model:
+                        (typeof payload.params?.model === 'string' && payload.params.model) ||
+                        task.model,
+                      modelId:
+                        (typeof payload.params?.modelId === 'string' && payload.params.modelId) ||
+                        task.modelId,
+                      upstreamTaskId:
+                        (typeof payload.params?.upstreamTaskId === 'string' &&
+                          payload.params.upstreamTaskId) ||
+                        task.upstreamTaskId,
+                      upstreamStatus:
+                        (typeof payload.params?.upstreamStatus === 'string' &&
+                          payload.params.upstreamStatus) ||
+                        task.upstreamStatus,
+                      upstreamState:
+                        (typeof payload.params?.upstreamState === 'string' &&
+                          payload.params.upstreamState) ||
+                        task.upstreamState,
+                      upstreamStatusGroup:
+                        (typeof payload.params?.upstreamStatusGroup === 'string' &&
+                          payload.params.upstreamStatusGroup) ||
+                        task.upstreamStatusGroup,
+                      upstreamProgress:
+                        typeof payload.params?.upstreamProgress === 'number'
+                          ? payload.params.upstreamProgress
+                          : task.upstreamProgress,
+                      upstreamUpdatedAt:
+                        typeof payload.params?.upstreamUpdatedAt === 'number'
+                          ? payload.params.upstreamUpdatedAt
+                          : task.upstreamUpdatedAt,
+                      persisted: true,
                     }
                   : task
               )
@@ -533,10 +584,23 @@ export function VideoGenerationView({
             ...task,
             status: task.status === 'processing' ? 'processing' : 'pending',
             progress: typeof task.progress === 'number' ? task.progress : 0,
+            persisted: true,
           }) satisfies Task
       );
 
-      setTasks((prev) => replaceActiveTasks(prev, videoTasks));
+      setTasks((prev) => {
+        const preservedActiveTasks = prev.filter(
+          (task) =>
+            (task.status === 'pending' || task.status === 'processing') &&
+            !videoTasks.some((incoming) => incoming.id === task.id) &&
+            (task.persisted === false || videoTasks.length === 0)
+        );
+
+        const next = replaceActiveTasks(prev, videoTasks);
+        return preservedActiveTasks.length > 0
+          ? mergeTasksById(next, preservedActiveTasks)
+          : next;
+      });
 
       videoTasks.forEach((task) => {
         void pollTaskStatus(task.id, task.prompt);
@@ -570,12 +634,16 @@ export function VideoGenerationView({
         void refreshGenerationFeed();
       }
     };
+    const intervalId = window.setInterval(() => {
+      void refreshGenerationFeed();
+    }, 15000);
 
     void refreshGenerationFeed();
     window.addEventListener('focus', handleWindowFocus);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      window.clearInterval(intervalId);
       window.removeEventListener('focus', handleWindowFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       abortControllers.forEach((controller) => controller.abort());
@@ -589,6 +657,19 @@ export function VideoGenerationView({
       filesRef.current = [];
     };
   }, []);
+
+  const resolvedTasks = useMemo(
+    () =>
+      tasks.map((task) => ({
+        ...task,
+        model: resolveVideoModelLabel({
+          modelId: task.modelId,
+          model: task.model,
+          modelNameMap: videoModelMap,
+        }),
+      })),
+    [tasks, videoModelMap]
+  );
 
   const handleRemoveTask = useCallback(async (taskId: string) => {
     const controller = abortControllersRef.current.get(taskId);
@@ -754,9 +835,11 @@ export function VideoGenerationView({
       modelId,
       type: 'sora-video',
       status: 'pending',
+      progress: 0,
       createdAt: Date.now(),
+      persisted: false,
     };
-    setTasks((prev) => [newTask, ...prev]);
+    setTasks((prev) => mergeTasksById(prev, [newTask]));
     void pollTaskStatus(data.data.id, taskPrompt);
 
     return data.data.id;
@@ -1030,6 +1113,7 @@ export function VideoGenerationView({
                   label: m.name,
                   description: m.description,
                   highlight: m.highlight,
+                  icon: <ModelPreview {...getVideoModelPreviewMeta(m)} />,
                 }))}
                 placeholder="选择模型"
               />
@@ -1139,7 +1223,8 @@ export function VideoGenerationView({
       <div className="order-1 flex-1 min-h-0 overflow-hidden">
         <ResultGallery
           generations={generations}
-          tasks={tasks}
+          tasks={resolvedTasks}
+          videoModelMap={videoModelMap}
           onRemoveTask={handleRemoveTask}
           onClearFailedTasks={handleClearFailedTasks}
           onRemoveGeneration={handleRemoveGeneration}

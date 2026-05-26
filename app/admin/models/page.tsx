@@ -3,10 +3,16 @@
 import { useState, useEffect } from 'react';
 import {
   MessageSquare, Loader2, Save, Eye, EyeOff, Plus, Trash2, 
-  AlertCircle, Check, X, Edit2, Power
+  Check, X, Edit2
 } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import type { ChatModel } from '@/types';
+import { formatBillingSummary } from '@/lib/billing';
+
+const BILLING_MODE_OPTIONS = [
+  { value: 'per_call', label: '按次' },
+  { value: 'per_1k_tokens', label: '按量(Token)' },
+] as const;
 
 export default function ModelsPage() {
   const [models, setModels] = useState<ChatModel[]>([]);
@@ -15,6 +21,7 @@ export default function ModelsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [form, setForm] = useState({
     name: '',
     apiUrl: '',
@@ -23,6 +30,10 @@ export default function ModelsPage() {
     supportsVision: false,
     maxTokens: 4096,
     costPerMessage: 1,
+    billingMode: 'per_call' as 'per_call' | 'per_1k_tokens',
+    billingPrice: 1,
+    billingUnit: 1,
+    imageUrl: '',
     enabled: true,
   });
 
@@ -53,6 +64,10 @@ export default function ModelsPage() {
       supportsVision: false,
       maxTokens: 4096,
       costPerMessage: 1,
+      billingMode: 'per_call',
+      billingPrice: 1,
+      billingUnit: 1,
+      imageUrl: '',
       enabled: true,
     });
     setShowAdvanced(false);
@@ -68,12 +83,36 @@ export default function ModelsPage() {
       supportsVision: model.supportsVision,
       maxTokens: model.maxTokens,
       costPerMessage: model.costPerMessage,
+      billingMode: (model.billingMode as 'per_call' | 'per_1k_tokens') || 'per_call',
+      billingPrice: model.billingPrice || model.costPerMessage || 1,
+      billingUnit: model.billingUnit || 1,
+      imageUrl: model.imageUrl || '',
       enabled: model.enabled,
     });
     setEditingId(model.id);
     setShowAdvanced(true);
   };
 
+
+
+  const bootstrapPresets = async () => {
+    setBootstrapping(true);
+    try {
+      const res = await fetch('/api/admin/bootstrap-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'chat' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '生成失败');
+      toast({ title: data.data?.count ? `已导入 ${data.data.count} 个聊天模型` : '聊天模型已存在' });
+      loadModels();
+    } catch (err) {
+      toast({ title: '生成预置失败', description: err instanceof Error ? err.message : '未知错误', variant: 'destructive' });
+    } finally {
+      setBootstrapping(false);
+    }
+  };
 
   const saveModel = async () => {
     if (!form.name || !form.apiUrl || !form.apiKey || !form.modelId) {
@@ -140,6 +179,12 @@ export default function ModelsPage() {
       <div>
         <h1 className="text-3xl font-light text-foreground">聊天模型</h1>
         <p className="text-foreground/50 mt-1">配置 OpenAI 兼容的聊天模型</p>
+        <div className="mt-4">
+          <button onClick={bootstrapPresets} disabled={bootstrapping} className="flex items-center gap-2 px-4 py-2.5 bg-card/70 border border-border/70 rounded-xl text-foreground hover:bg-card/80 disabled:opacity-50">
+            {bootstrapping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            一键导入灵刻聊天模型
+          </button>
+        </div>
       </div>
 
       {/* Form */}
@@ -173,6 +218,21 @@ export default function ModelsPage() {
               placeholder="gpt-4o"
               className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
             />
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <label className="text-sm text-foreground/70">模型图片 URL</label>
+            <input
+              type="text"
+              value={form.imageUrl}
+              onChange={(e) => setForm({ ...form, imageUrl: e.target.value })}
+              placeholder="https://.../model-cover.png 或 /huantu-logo.jpg"
+              className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+            />
+            {form.imageUrl ? (
+              <div className="mt-2 h-24 w-40 overflow-hidden rounded-xl border border-border/60 bg-card/70">
+                <img src={form.imageUrl} alt="模型图片预览" className="h-full w-full object-cover" />
+              </div>
+            ) : null}
           </div>
           <div className="space-y-2">
             <label className="text-sm text-foreground/70">Base URL *</label>
@@ -245,11 +305,42 @@ export default function ModelsPage() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm text-foreground/70">每次消耗积分</label>
+              <label className="text-sm text-foreground/70">兼容旧积分字段</label>
               <input
                 type="number"
                 value={form.costPerMessage}
                 onChange={(e) => setForm({ ...form, costPerMessage: parseInt(e.target.value) || 1 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费方式</label>
+              <select
+                value={form.billingMode}
+                onChange={(e) => setForm({ ...form, billingMode: e.target.value as 'per_call' | 'per_1k_tokens' })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              >
+                {BILLING_MODE_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费价格</label>
+              <input
+                type="number"
+                value={form.billingPrice}
+                onChange={(e) => setForm({ ...form, billingPrice: parseInt(e.target.value) || 1 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">{form.billingMode === 'per_1k_tokens' ? '每多少个 1000 Tokens' : '计费单位'}</label>
+              <input
+                type="number"
+                min="1"
+                value={form.billingUnit}
+                onChange={(e) => setForm({ ...form, billingUnit: parseInt(e.target.value) || 1 })}
                 className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
               />
             </div>
@@ -282,10 +373,12 @@ export default function ModelsPage() {
           <table className="w-full min-w-[760px]">
           <thead>
             <tr className="border-b border-border/70">
+              <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">图片</th>
               <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">名称</th>
               <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">模型 ID</th>
               <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">Base URL</th>
-              <th className="text-center text-sm font-medium text-foreground/50 px-5 py-4">图片</th>
+              <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">计费</th>
+              <th className="text-center text-sm font-medium text-foreground/50 px-5 py-4">视觉</th>
               <th className="text-center text-sm font-medium text-foreground/50 px-5 py-4">状态</th>
               <th className="text-right text-sm font-medium text-foreground/50 px-5 py-4">操作</th>
             </tr>
@@ -293,9 +386,24 @@ export default function ModelsPage() {
           <tbody>
             {models.map((model) => (
               <tr key={model.id} className="border-b border-border/70 hover:bg-card/60">
+                <td className="px-5 py-4">
+                  {model.imageUrl ? (
+                    <img src={model.imageUrl} alt={model.name} className="h-10 w-16 rounded-lg object-cover border border-border/60" />
+                  ) : (
+                    <div className="flex h-10 w-16 items-center justify-center rounded-lg border border-border/60 bg-card/70 text-[10px] text-foreground/35">未设置</div>
+                  )}
+                </td>
                 <td className="px-5 py-4 text-foreground font-medium">{model.name}</td>
                 <td className="px-5 py-4 text-foreground/60 font-mono text-sm">{model.modelId}</td>
                 <td className="px-5 py-4 text-foreground/60 text-sm truncate max-w-[200px]">{model.apiUrl}</td>
+                <td className="px-5 py-4 text-foreground/60 text-sm">
+                  {formatBillingSummary({
+                    billingMode: model.billingMode,
+                    billingPrice: model.billingPrice,
+                    billingUnit: model.billingUnit,
+                    legacyCost: model.costPerMessage,
+                  })}
+                </td>
                 <td className="px-5 py-4 text-center">
                   {model.supportsVision ? (
                     <Check className="w-4 h-4 text-green-400 mx-auto" />
@@ -346,4 +454,3 @@ export default function ModelsPage() {
     </div>
   );
 }
-

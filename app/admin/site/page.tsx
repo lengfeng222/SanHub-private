@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Coins,
   Database,
+  CreditCard,
   Globe,
   LayoutGrid,
   Loader2,
@@ -18,6 +19,7 @@ import type { ChatModel, ImageBucketConfig, SystemConfig } from '@/types';
 import { toast } from '@/components/ui/toaster';
 import { useSiteConfigRefresh } from '@/components/providers/site-config-provider';
 import { findBlockedWords } from '@/lib/prompt-blocklist-core';
+import { formatBillingSummary } from '@/lib/billing';
 
 function bucketId() {
   return `bucket-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -88,6 +90,11 @@ function Switch({
   );
 }
 
+const AUDIO_BILLING_OPTIONS = [
+  { value: 'per_call', label: '按次' },
+  { value: 'per_second', label: '按秒' },
+] as const;
+
 export default function SiteConfigPage() {
   const [config, setConfig] = useState<SystemConfig | null>(null);
   const [chatModels, setChatModels] = useState<ChatModel[]>([]);
@@ -137,6 +144,8 @@ export default function SiteConfigPage() {
           featureFlags: config.featureFlags,
           inviteSettings: config.inviteSettings,
           imageStorage: config.imageStorage,
+          audioProvider: config.audioProvider,
+          paymentProvider: config.paymentProvider,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -791,6 +800,391 @@ export default function SiteConfigPage() {
             : '黑名单当前未启用'}
         </p>
       </Card>
+
+      <Card icon={CreditCard} title="易支付充值">
+        <div className="flex items-center justify-between rounded-xl border border-border/70 bg-card/50 p-4">
+          <div>
+            <p className="text-sm text-foreground">启用在线充值</p>
+            <p className="mt-1 text-xs text-foreground/30">开启后钱包页会创建易支付订单并跳转支付。</p>
+          </div>
+          <Switch
+            checked={config.paymentProvider.enabled}
+            onClick={() =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: {
+                  ...prev.paymentProvider,
+                  enabled: !prev.paymentProvider.enabled,
+                },
+              }))
+            }
+            color="bg-emerald-500"
+          />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <input
+            value={config.paymentProvider.apiUrl}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: { ...prev.paymentProvider, apiUrl: event.target.value },
+              }))
+            }
+            placeholder="易支付接口地址，例如 https://vip1.zhunfu.cn/"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.paymentProvider.pid}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: { ...prev.paymentProvider, pid: event.target.value },
+              }))
+            }
+            placeholder="商户 PID"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.paymentProvider.key}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: { ...prev.paymentProvider, key: event.target.value },
+              }))
+            }
+            placeholder="商户 Key"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.paymentProvider.notifyUrl}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: { ...prev.paymentProvider, notifyUrl: event.target.value },
+              }))
+            }
+            placeholder="异步通知地址，留空自动使用 /api/payment/notify"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.paymentProvider.returnUrl}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: { ...prev.paymentProvider, returnUrl: event.target.value },
+              }))
+            }
+            placeholder="同步跳转地址，留空自动回到 /recharge"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.paymentProvider.payTypes.join(',')}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                paymentProvider: {
+                  ...prev.paymentProvider,
+                  payTypes: event.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                },
+              }))
+            }
+            placeholder="支付方式：alipay,wxpay"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
+            <Coins className="h-4 w-4 text-yellow-400" />
+            <input
+              type="number"
+              min="1"
+              value={config.paymentProvider.pointRate}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  paymentProvider: { ...prev.paymentProvider, pointRate: Math.max(1, Number(event.target.value) || 1) },
+                }))
+              }
+              className="w-full bg-transparent text-foreground focus:outline-none"
+            />
+            <span className="text-sm text-foreground/50">积分/元</span>
+          </div>
+          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
+            <Coins className="h-4 w-4 text-yellow-400" />
+            <input
+              type="number"
+              min="1"
+              value={config.paymentProvider.minAmount}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  paymentProvider: { ...prev.paymentProvider, minAmount: Math.max(1, Number(event.target.value) || 1) },
+                }))
+              }
+              className="w-full bg-transparent text-foreground focus:outline-none"
+            />
+            <span className="text-sm text-foreground/50">最低充值元</span>
+          </div>
+        </div>
+      </Card>
+
+      <Card icon={Database} title="音频 API 密钥">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <input
+            value={config.audioProvider.musicBaseUrl}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, musicBaseUrl: event.target.value },
+              }))
+            }
+            placeholder="音乐 Base URL"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.musicApiKey}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, musicApiKey: event.target.value },
+              }))
+            }
+            placeholder="音乐 API Key"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.musicModel}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, musicModel: event.target.value },
+              }))
+            }
+            placeholder="音乐模型名"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.musicEndpointPath}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, musicEndpointPath: event.target.value },
+              }))
+            }
+            placeholder="音乐接口路径"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceBaseUrl}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceBaseUrl: event.target.value },
+              }))
+            }
+            placeholder="TTS Base URL"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceApiKey}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceApiKey: event.target.value },
+              }))
+            }
+            placeholder="TTS API Key"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceModel}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceModel: event.target.value },
+              }))
+            }
+            placeholder="TTS 模型名"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceVoice}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceVoice: event.target.value },
+              }))
+            }
+            placeholder="默认音色"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceFormat}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceFormat: event.target.value },
+              }))
+            }
+            placeholder="默认格式"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+          <input
+            value={config.audioProvider.voiceEndpointPath}
+            onChange={(event) =>
+              patch((prev) => ({
+                ...prev,
+                audioProvider: { ...prev.audioProvider, voiceEndpointPath: event.target.value },
+              }))
+            }
+            placeholder="TTS 接口路径"
+            className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+          />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
+            <Coins className="h-4 w-4 text-yellow-400" />
+            <input
+              type="number"
+              min="0"
+              value={config.audioProvider.musicCost}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  audioProvider: { ...prev.audioProvider, musicCost: Math.max(0, Number(event.target.value) || 0) },
+                }))
+              }
+              className="w-full bg-transparent text-foreground focus:outline-none"
+            />
+            <span className="text-sm text-foreground/50">音乐消耗积分</span>
+          </div>
+          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
+            <Coins className="h-4 w-4 text-yellow-400" />
+            <input
+              type="number"
+              min="0"
+              value={config.audioProvider.voiceCost}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  audioProvider: { ...prev.audioProvider, voiceCost: Math.max(0, Number(event.target.value) || 0) },
+                }))
+              }
+              className="w-full bg-transparent text-foreground focus:outline-none"
+            />
+            <span className="text-sm text-foreground/50">TTS 消耗积分</span>
+          </div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-3 rounded-lg border border-border/70 bg-card/60 p-4">
+            <p className="text-sm text-foreground">音乐计费规则</p>
+            <p className="text-xs text-foreground/40">
+              当前：{formatBillingSummary({
+                billingMode: config.audioProvider.musicBillingMode,
+                billingPrice: config.audioProvider.musicBillingPrice,
+                billingUnit: config.audioProvider.musicBillingUnit,
+                legacyCost: config.audioProvider.musicCost,
+              })}
+            </p>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <select
+                value={config.audioProvider.musicBillingMode || 'per_call'}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, musicBillingMode: event.target.value as 'per_call' | 'per_second' },
+                  }))
+                }
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              >
+                {AUDIO_BILLING_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min="0"
+                value={config.audioProvider.musicBillingPrice || 0}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, musicBillingPrice: Math.max(0, Number(event.target.value) || 0) },
+                  }))
+                }
+                placeholder="价格"
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              />
+              <input
+                type="number"
+                min="1"
+                value={config.audioProvider.musicBillingUnit || 1}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, musicBillingUnit: Math.max(1, Number(event.target.value) || 1) },
+                  }))
+                }
+                placeholder="单位"
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              />
+            </div>
+          </div>
+          <div className="space-y-3 rounded-lg border border-border/70 bg-card/60 p-4">
+            <p className="text-sm text-foreground">语音计费规则</p>
+            <p className="text-xs text-foreground/40">
+              当前：{formatBillingSummary({
+                billingMode: config.audioProvider.voiceBillingMode,
+                billingPrice: config.audioProvider.voiceBillingPrice,
+                billingUnit: config.audioProvider.voiceBillingUnit,
+                legacyCost: config.audioProvider.voiceCost,
+              })}
+            </p>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <select
+                value={config.audioProvider.voiceBillingMode || 'per_call'}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, voiceBillingMode: event.target.value as 'per_call' | 'per_second' },
+                  }))
+                }
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              >
+                {AUDIO_BILLING_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min="0"
+                value={config.audioProvider.voiceBillingPrice || 0}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, voiceBillingPrice: Math.max(0, Number(event.target.value) || 0) },
+                  }))
+                }
+                placeholder="价格"
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              />
+              <input
+                type="number"
+                min="1"
+                value={config.audioProvider.voiceBillingUnit || 1}
+                onChange={(event) =>
+                  patch((prev) => ({
+                    ...prev,
+                    audioProvider: { ...prev.audioProvider, voiceBillingUnit: Math.max(1, Number(event.target.value) || 1) },
+                  }))
+                }
+                placeholder="单位"
+                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+
       <Card icon={Zap} title="运行参数">
         <div className="flex items-center justify-between rounded-xl border border-border/70 bg-card/50 p-4">
           <div>

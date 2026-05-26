@@ -14,6 +14,7 @@ import type {
   VideoDuration,
   VideoConfigObject,
 } from '@/types';
+import { formatBillingSummary } from '@/lib/billing';
 
 const CHANNEL_TYPES: { value: VideoChannelType; label: string }[] = [
   { value: 'apexerapi', label: 'ApexerAPI' },
@@ -21,6 +22,7 @@ const CHANNEL_TYPES: { value: VideoChannelType; label: string }[] = [
   { value: 'openai-compatible', label: 'OpenAI 流式' },
   { value: 'flow2api', label: 'Flow2API' },
   { value: 'grok2api', label: 'Grok2API' },
+  { value: 'lingke-media', label: '灵刻媒体' },
 ];
 
 const DEFAULT_FEATURES: VideoModelFeatures = {
@@ -89,6 +91,36 @@ const GROK_TEMPLATE_VIDEO_CONFIG_OBJECT: VideoConfigObject = {
   preset: 'normal',
 };
 
+const LINGKE_TEMPLATE_VIDEO_CONFIG_OBJECT: VideoConfigObject = {
+  aspect_ratio: '16:9',
+  video_length: 8,
+  resolution: '720P',
+  preset: 'normal',
+  generation_mode: 'normal',
+  off_peak: false,
+};
+
+function normalizeExtraParams(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+
+  try {
+    const cloned = JSON.parse(JSON.stringify(raw)) as unknown;
+    if (!cloned || typeof cloned !== 'object' || Array.isArray(cloned)) return undefined;
+    return Object.keys(cloned).length > 0 ? (cloned as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatExtraParamsForTextarea(raw?: Record<string, unknown>): string {
+  if (!raw || Object.keys(raw).length === 0) return '';
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return '';
+  }
+}
+
 function parseDurationToSeconds(duration: string): number {
   const matched = (duration || '').match(/(\d+)/);
   const value = matched ? Number.parseInt(matched[1], 10) : 8;
@@ -108,16 +140,62 @@ function normalizeAspectRatioForVideoConfig(aspectRatio?: string): NonNullable<V
 
 function normalizeVideoConfigObject(input: VideoConfigObject): VideoConfigObject {
   const videoLengthRaw = typeof input.video_length === 'number' ? input.video_length : 8;
-  const videoLength = Math.max(5, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, Math.floor(videoLengthRaw)));
-  const resolution = input.resolution === 'SD' ? 'SD' : 'HD';
+  const videoLength = Math.max(1, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, Math.floor(videoLengthRaw)));
+  const resolution = String(input.resolution || '720P').trim().toUpperCase() || '720P';
   const preset = input.preset === 'fun' || input.preset === 'spicy' ? input.preset : 'normal';
-  return {
+  const next: VideoConfigObject = {
     aspect_ratio: normalizeAspectRatioForVideoConfig(input.aspect_ratio),
     video_length: videoLength,
     resolution,
     preset,
   };
+
+  if (typeof input.generation_mode === 'string' && input.generation_mode.trim()) {
+    next.generation_mode = input.generation_mode.trim();
+  }
+  if (typeof input.off_peak === 'boolean') {
+    next.off_peak = input.off_peak;
+  }
+  if (typeof input.quality_version === 'string' && input.quality_version.trim()) {
+    next.quality_version = input.quality_version.trim();
+  }
+  if (typeof input.model_version === 'string' && input.model_version.trim()) {
+    next.model_version = input.model_version.trim();
+  }
+  if (typeof input.version === 'string' && input.version.trim()) {
+    next.version = input.version.trim();
+  }
+  const extraParams = normalizeExtraParams(input.extra_params);
+  if (extraParams) {
+    next.extra_params = extraParams;
+  }
+
+  return next;
 }
+
+type ModelFormState = {
+  name: string;
+  description: string;
+  apiModel: string;
+  baseUrl: string;
+  apiKey: string;
+  features: {
+    textToVideo: boolean;
+    imageToVideo: boolean;
+    videoToVideo: boolean;
+    supportStyles: boolean;
+  };
+  defaultAspectRatio: string;
+  defaultDuration: string;
+  videoConfigObject: VideoConfigObject;
+  highlight: boolean;
+  enabled: boolean;
+  billingMode: 'per_call' | 'per_second';
+  billingPrice: number;
+  billingUnit: number;
+  imageUrl: string;
+  sortOrder: number;
+};
 
 function buildGrokTemplateModelPayload(channelId: string) {
   return {
@@ -138,6 +216,10 @@ function buildGrokTemplateModelPayload(channelId: string) {
     videoConfigObject: GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
     highlight: false,
     enabled: true,
+    billingMode: 'per_second',
+    billingPrice: 12,
+    billingUnit: 1,
+    imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
 }
@@ -160,11 +242,41 @@ function buildSoraTemplateModelPayload(channelId: string) {
     defaultDuration: '8s',
     highlight: true,
     enabled: true,
+    billingMode: 'per_second' as const,
+    billingPrice: 12,
+    billingUnit: 1,
+    imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
 }
 
-function buildManualTemplateModelPayload(channel: VideoChannel) {
+function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState {
+  if (channel.type === 'lingke-media') {
+    return {
+      name: `${channel.name} 默认模型`,
+      description: '适合灵刻 AI /v1/media/generate 的异步视频模型',
+      apiModel: 'veo3.1-lite',
+      baseUrl: '',
+      apiKey: '',
+      features: {
+        textToVideo: true,
+        imageToVideo: true,
+        videoToVideo: false,
+        supportStyles: false,
+      },
+      defaultAspectRatio: '16:9',
+      defaultDuration: '8s',
+      videoConfigObject: normalizeVideoConfigObject(LINGKE_TEMPLATE_VIDEO_CONFIG_OBJECT),
+      highlight: true,
+      enabled: true,
+      billingMode: 'per_second',
+      billingPrice: 12,
+      billingUnit: 1,
+      imageUrl: '/huantu-logo.jpg',
+      sortOrder: 0,
+    };
+  }
+
   if (channel.type === 'grok2api') {
     return {
       name: 'Grok Imagine Video',
@@ -180,11 +292,15 @@ function buildManualTemplateModelPayload(channel: VideoChannel) {
       },
       defaultAspectRatio: '16:9',
       defaultDuration: '8s',
-      videoConfigObject: {
+      videoConfigObject: normalizeVideoConfigObject({
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
-      },
+      }),
       highlight: false,
       enabled: true,
+      billingMode: 'per_second',
+      billingPrice: 12,
+      billingUnit: 1,
+      imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
   }
@@ -204,11 +320,15 @@ function buildManualTemplateModelPayload(channel: VideoChannel) {
       },
       defaultAspectRatio: 'landscape',
       defaultDuration: '8s',
-      videoConfigObject: {
+      videoConfigObject: normalizeVideoConfigObject({
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
-      },
+      }),
       highlight: true,
       enabled: true,
+      billingMode: 'per_second',
+      billingPrice: 12,
+      billingUnit: 1,
+      imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
   }
@@ -228,11 +348,15 @@ function buildManualTemplateModelPayload(channel: VideoChannel) {
       },
       defaultAspectRatio: 'landscape',
       defaultDuration: '8s',
-      videoConfigObject: {
+      videoConfigObject: normalizeVideoConfigObject({
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
-      },
+      }),
       highlight: false,
       enabled: true,
+      billingMode: 'per_second',
+      billingPrice: 12,
+      billingUnit: 1,
+      imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
   }
@@ -251,11 +375,15 @@ function buildManualTemplateModelPayload(channel: VideoChannel) {
     },
     defaultAspectRatio: 'landscape',
     defaultDuration: '8s',
-    videoConfigObject: {
+    videoConfigObject: normalizeVideoConfigObject({
       ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
-    },
+    }),
     highlight: false,
     enabled: true,
+    billingMode: 'per_second',
+    billingPrice: 12,
+    billingUnit: 1,
+    imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
 }
@@ -267,6 +395,7 @@ export default function VideoChannelsPage() {
   const [saving, setSaving] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [importingChannelId, setImportingChannelId] = useState<string | null>(null);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [remoteFlowModelsChannelId, setRemoteFlowModelsChannelId] = useState<string | null>(null);
   const [remoteFlowModels, setRemoteFlowModels] = useState<RemoteFlow2ApiModel[]>([]);
   const [fetchingRemoteFlowModels, setFetchingRemoteFlowModels] = useState(false);
@@ -287,7 +416,7 @@ export default function VideoChannelsPage() {
   // Model form
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [modelChannelId, setModelChannelId] = useState<string | null>(null);
-  const [modelForm, setModelForm] = useState({
+  const [modelForm, setModelForm] = useState<ModelFormState>({
     name: '',
     description: '',
     apiModel: '',
@@ -301,14 +430,39 @@ export default function VideoChannelsPage() {
     } as VideoConfigObject,
     highlight: false,
     enabled: true,
+    billingMode: 'per_second',
+    billingPrice: 12,
+    billingUnit: 1,
+    imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   });
   const [aspectRatioRows, setAspectRatioRows] = useState<AspectRatioRow[]>([...DEFAULT_ASPECT_RATIOS]);
   const [durationRows, setDurationRows] = useState<DurationRow[]>([...DEFAULT_DURATIONS]);
+  const [videoExtraParamsText, setVideoExtraParamsText] = useState('');
 
   useEffect(() => {
     loadData();
   }, []);
+
+
+  const bootstrapPresets = async () => {
+    setBootstrapping(true);
+    try {
+      const res = await fetch('/api/admin/bootstrap-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'video' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '生成失败');
+      toast({ title: data.data?.count ? `已生成 ${data.data.count} 个视频预置` : '视频预置已存在' });
+      loadData();
+    } catch (err) {
+      toast({ title: '生成预置失败', description: err instanceof Error ? err.message : '未知错误', variant: 'destructive' });
+    } finally {
+      setBootstrapping(false);
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -360,8 +514,9 @@ export default function VideoChannelsPage() {
       videoConfigObject: {
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
       },
-      highlight: false, enabled: true, sortOrder: 0,
+      highlight: false, enabled: true, billingMode: 'per_second', billingPrice: 12, billingUnit: 1, imageUrl: '', sortOrder: 0,
     });
+    setVideoExtraParamsText('');
     setAspectRatioRows([...DEFAULT_ASPECT_RATIOS]);
     setDurationRows([...DEFAULT_DURATIONS]);
     setEditingModel(null);
@@ -384,7 +539,7 @@ export default function VideoChannelsPage() {
       ? normalizeVideoConfigObject(model.videoConfigObject)
       : normalizeVideoConfigObject({
           aspect_ratio: normalizeAspectRatioForVideoConfig(model.defaultAspectRatio),
-          video_length: Math.max(5, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, parseDurationToSeconds(model.defaultDuration))),
+          video_length: Math.max(1, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, parseDurationToSeconds(model.defaultDuration))),
           resolution: 'HD' as const,
           preset: 'normal' as const,
         });
@@ -401,8 +556,13 @@ export default function VideoChannelsPage() {
       videoConfigObject: existingVideoConfigObject,
       highlight: model.highlight || false,
       enabled: model.enabled,
+      billingMode: (model.billingMode as 'per_call' | 'per_second') || 'per_second',
+      billingPrice: model.billingPrice || 12,
+      billingUnit: model.billingUnit || 1,
+      imageUrl: model.imageUrl || '',
       sortOrder: model.sortOrder,
     });
+    setVideoExtraParamsText(formatExtraParamsForTextarea(existingVideoConfigObject.extra_params));
     setAspectRatioRows(model.aspectRatios);
     setDurationRows(model.durations);
     setEditingModel(model.id);
@@ -414,7 +574,9 @@ export default function VideoChannelsPage() {
     if (!channel) return;
 
     resetModelForm();
-    setModelForm(buildManualTemplateModelPayload(channel));
+    const template = buildManualTemplateModelPayload(channel);
+    setModelForm(template);
+    setVideoExtraParamsText(formatExtraParamsForTextarea(template.videoConfigObject.extra_params));
     setAspectRatioRows(
       channel.type === 'grok2api'
         ? [...GROK_TEMPLATE_ASPECT_RATIOS]
@@ -744,18 +906,37 @@ export default function VideoChannelsPage() {
       const normalizedModelBaseUrl = modelForm.baseUrl.trim();
       const normalizedModelApiKey = modelForm.apiKey.trim();
       const selectedChannel = channels.find((channel) => channel.id === modelChannelId);
-      const videoConfigObject =
-        selectedChannel?.type === 'grok2api'
-          ? normalizeVideoConfigObject({
-              ...(modelForm.videoConfigObject || {}),
-              aspect_ratio:
-                modelForm.videoConfigObject?.aspect_ratio ||
-                normalizeAspectRatioForVideoConfig(defaultAspectRatio),
-              video_length:
-                modelForm.videoConfigObject?.video_length ||
-                Math.max(5, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, parseDurationToSeconds(defaultDuration))),
-            })
-          : undefined;
+      let parsedExtraParams: Record<string, unknown> | undefined;
+      if (videoExtraParamsText.trim()) {
+        try {
+          const parsed = JSON.parse(videoExtraParamsText) as unknown;
+          parsedExtraParams = normalizeExtraParams(parsed);
+          if (!parsedExtraParams) {
+            throw new Error('extra_params 需要是 JSON 对象');
+          }
+        } catch (error) {
+          toast({
+            title: 'extra_params 格式错误',
+            description: error instanceof Error ? error.message : '请填写合法 JSON 对象',
+            variant: 'destructive',
+          });
+          setSaving(false);
+          return;
+        }
+      }
+
+      const videoConfigObject = selectedChannel
+        ? normalizeVideoConfigObject({
+            ...(modelForm.videoConfigObject || {}),
+            aspect_ratio:
+              modelForm.videoConfigObject?.aspect_ratio ||
+              normalizeAspectRatioForVideoConfig(defaultAspectRatio),
+            video_length:
+              modelForm.videoConfigObject?.video_length ||
+              Math.max(1, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, parseDurationToSeconds(defaultDuration))),
+            extra_params: parsedExtraParams,
+          })
+        : undefined;
 
       const payload = {
         ...(editingModel ? { id: editingModel } : {}),
@@ -783,6 +964,10 @@ export default function VideoChannelsPage() {
         videoConfigObject,
         highlight: modelForm.highlight,
         enabled: modelForm.enabled,
+        billingMode: modelForm.billingMode,
+        billingPrice: modelForm.billingPrice,
+        billingUnit: modelForm.billingUnit,
+        imageUrl: modelForm.imageUrl || undefined,
         sortOrder: modelForm.sortOrder,
       };
 
@@ -1062,6 +1247,22 @@ export default function VideoChannelsPage() {
             </div>
           </div>
 
+          <div className="space-y-2">
+            <label className="text-sm text-foreground/70">模型图片 URL</label>
+            <input
+              type="text"
+              value={modelForm.imageUrl}
+              onChange={(e) => setModelForm({ ...modelForm, imageUrl: e.target.value })}
+              placeholder="https://.../model-cover.png 或 /huantu-logo.jpg"
+              className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+            />
+            {modelForm.imageUrl ? (
+              <div className="mt-2 h-28 w-48 overflow-hidden rounded-xl border border-border/60 bg-card/70">
+                <img src={modelForm.imageUrl} alt="模型图片预览" className="h-full w-full object-cover" />
+              </div>
+            ) : null}
+          </div>
+
           <div className="flex items-center justify-between gap-3 text-xs text-foreground/40">
             <span>留空后保存即可使用渠道级 Base URL / API Key。</span>
             <button
@@ -1219,15 +1420,47 @@ export default function VideoChannelsPage() {
                 className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
               />
             </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费方式</label>
+              <select
+                value={modelForm.billingMode}
+                onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              >
+                <option value="per_second" className="bg-card/95">按秒</option>
+                <option value="per_call" className="bg-card/95">按次</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费价格</label>
+              <input
+                type="number"
+                value={modelForm.billingPrice}
+                onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 12 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">{modelForm.billingMode === 'per_second' ? '每多少秒' : '计费单位'}</label>
+              <input
+                type="number"
+                min="1"
+                value={modelForm.billingUnit}
+                onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
           </div>
 
           {(() => {
             const currentChannel = channels.find((channel) => channel.id === modelChannelId);
-            if (currentChannel?.type !== 'grok2api') return null;
+            if (currentChannel?.type !== 'grok2api' && currentChannel?.type !== 'lingke-media') return null;
 
             return (
               <div className="space-y-3 pt-2">
-                <label className="text-sm text-foreground/70">Video Config Object（Grok 专用）</label>
+                <label className="text-sm text-foreground/70">
+                  Video Config Object{currentChannel.type === 'lingke-media' ? '（灵刻专用）' : '（Grok 专用）'}
+                </label>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className="space-y-2">
                     <label className="text-xs text-foreground/60">aspect_ratio</label>
@@ -1265,7 +1498,7 @@ export default function VideoChannelsPage() {
                           ...modelForm,
                           videoConfigObject: {
                             ...modelForm.videoConfigObject,
-                            video_length: Number.isFinite(value) ? Math.max(5, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, value)) : 10,
+                            video_length: Number.isFinite(value) ? Math.max(1, Math.min(GROK_MAX_VIDEO_LENGTH_SECONDS, value)) : 10,
                           },
                         });
                       }}
@@ -1276,7 +1509,7 @@ export default function VideoChannelsPage() {
                   <div className="space-y-2">
                     <label className="text-xs text-foreground/60">resolution</label>
                     <select
-                      value={modelForm.videoConfigObject.resolution || 'HD'}
+                      value={modelForm.videoConfigObject.resolution || '720P'}
                       onChange={(e) =>
                         setModelForm({
                           ...modelForm,
@@ -1288,8 +1521,9 @@ export default function VideoChannelsPage() {
                       }
                       className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
                     >
-                      <option value="HD" className="bg-card/95">HD</option>
-                      <option value="SD" className="bg-card/95">SD</option>
+                      <option value="720P" className="bg-card/95">720P</option>
+                      <option value="1080P" className="bg-card/95">1080P</option>
+                      <option value="2K" className="bg-card/95">2K</option>
                     </select>
                   </div>
 
@@ -1314,7 +1548,115 @@ export default function VideoChannelsPage() {
                     </select>
                   </div>
                 </div>
-                <p className="text-xs text-foreground/40">新增 Grok 渠道时会自动添加模板，默认分辨率为 HD。</p>
+                {currentChannel.type === 'lingke-media' ? (
+                  <div className="mt-4 space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-xs text-foreground/60">generation_mode</label>
+                        <input
+                          type="text"
+                          value={modelForm.videoConfigObject.generation_mode || 'normal'}
+                          onChange={(e) =>
+                            setModelForm({
+                              ...modelForm,
+                              videoConfigObject: {
+                                ...modelForm.videoConfigObject,
+                                generation_mode: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-foreground/60">off_peak</label>
+                        <select
+                          value={modelForm.videoConfigObject.off_peak ? 'true' : 'false'}
+                          onChange={(e) =>
+                            setModelForm({
+                              ...modelForm,
+                              videoConfigObject: {
+                                ...modelForm.videoConfigObject,
+                                off_peak: e.target.value === 'true',
+                              },
+                            })
+                          }
+                          className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                        >
+                          <option value="false" className="bg-card/95">false</option>
+                          <option value="true" className="bg-card/95">true</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-foreground/60">quality_version</label>
+                        <input
+                          type="text"
+                          value={modelForm.videoConfigObject.quality_version || 'standard'}
+                          onChange={(e) =>
+                            setModelForm({
+                              ...modelForm,
+                              videoConfigObject: {
+                                ...modelForm.videoConfigObject,
+                                quality_version: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-foreground/60">model_version</label>
+                        <input
+                          type="text"
+                          value={modelForm.videoConfigObject.model_version || 'standard'}
+                          onChange={(e) =>
+                            setModelForm({
+                              ...modelForm,
+                              videoConfigObject: {
+                                ...modelForm.videoConfigObject,
+                                model_version: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-foreground/60">version</label>
+                        <input
+                          type="text"
+                          value={modelForm.videoConfigObject.version || 'standard'}
+                          onChange={(e) =>
+                            setModelForm({
+                              ...modelForm,
+                              videoConfigObject: {
+                                ...modelForm.videoConfigObject,
+                                version: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs text-foreground/60">extra_params (JSON)</label>
+                      <textarea
+                        rows={5}
+                        value={videoExtraParamsText}
+                        onChange={(e) => setVideoExtraParamsText(e.target.value)}
+                        placeholder={'{\n  "seed": 123,\n  "some_provider_flag": "value"\n}'}
+                        className="w-full rounded-xl border border-border/70 bg-card/60 px-4 py-3 font-mono text-xs text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                      />
+                      <p className="text-xs text-foreground/40">
+                        用于补充灵刻特殊模型的附加参数。留空表示不透传额外字段。
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+                <p className="text-xs text-foreground/40">
+                  新增 {currentChannel.type === 'lingke-media' ? '灵刻' : 'Grok'} 渠道时会自动添加模板。
+                </p>
               </div>
             );
           })()}
@@ -1569,14 +1911,23 @@ export default function VideoChannelsPage() {
                         channelModels.map(model => (
                           <div key={model.id} className="flex items-center justify-between p-3 bg-card/60 rounded-xl hover:bg-card/70 transition-colors">
                             <div className="flex items-center gap-3">
-                              <Video className="w-4 h-4 text-blue-400" />
+                              {model.imageUrl ? (
+                                <img src={model.imageUrl} alt={model.name} className="h-11 w-16 rounded-xl border border-border/60 object-cover" />
+                              ) : (
+                                <div className="flex h-11 w-16 items-center justify-center rounded-xl border border-border/60 bg-card/70"><Video className="w-4 h-4 text-blue-400" /></div>
+                              )}
                               <div>
                                 <div className="flex items-center gap-2">
                                   <span className="text-foreground font-medium">{model.name}</span>
                                   {model.highlight && <span className="px-1.5 py-0.5 text-xs rounded bg-yellow-500/20 text-yellow-400">推荐</span>}
                                 </div>
                                 <p className="text-xs text-foreground/40">
-                                  {model.apiModel} · {model.durations.map(d => `${d.label}=${d.cost}积分`).join(', ')}
+                                  {model.apiModel} · {formatBillingSummary({
+                                    billingMode: model.billingMode,
+                                    billingPrice: model.billingPrice,
+                                    billingUnit: model.billingUnit,
+                                    legacyCost: model.durations?.[0]?.cost || 0,
+                                  })}
                                 </p>
                               </div>
                             </div>
@@ -1610,4 +1961,3 @@ export default function VideoChannelsPage() {
     </div>
   );
 }
-

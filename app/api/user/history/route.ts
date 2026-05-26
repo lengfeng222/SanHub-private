@@ -35,16 +35,24 @@ function parseHistoryStatus(value: string | null): UserGenerationStatusFilter {
 
 function convertToMediaUrl(generation: Generation): Generation {
   const { resultUrl, type } = generation;
-  
-  if (!resultUrl) {
-    return generation;
-  }
+  const upstreamResultUrl =
+    typeof generation.params === 'object' && generation.params && 'upstreamResultUrl' in generation.params
+      ? generation.params.upstreamResultUrl
+      : undefined;
+  const videoId =
+    typeof generation.params === 'object' && generation.params && 'videoId' in generation.params
+      ? generation.params.videoId
+      : undefined;
 
-  if (type.includes('video')) {
+  if (type.includes('video') && (resultUrl || videoId || upstreamResultUrl)) {
     return {
       ...generation,
       resultUrl: `/api/media/${generation.id}`,
     };
+  }
+
+  if (!resultUrl) {
+    return generation;
   }
 
   if (resultUrl.includes('/v1/videos/') && resultUrl.includes('/content')) {

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import type { ImageChannel, ImageModel, ImageModelFeatures } from '@/types';
+import { formatBillingSummary } from '@/lib/billing';
 
 const CHANNEL_TYPES = [
   { value: 'apexerapi', label: 'ApexerAPI', description: 'ApexerAPI image gateway' },
@@ -16,6 +17,7 @@ const CHANNEL_TYPES = [
   { value: 'modelscope', label: 'ModelScope', description: 'ModelScope API' },
   { value: 'gitee', label: 'Gitee AI', description: 'Gitee AI API' },
   { value: 'sora', label: 'Sora', description: 'OpenAI Sora API' },
+  { value: 'lingke-media', label: '灵刻媒体', description: '灵刻 AI /v1/media/generate 异步媒体接口' },
 ] as const;
 
 type ImageAdminChannelType = (typeof CHANNEL_TYPES)[number]['value'];
@@ -162,6 +164,10 @@ type ModelFormState = {
   highlight: boolean;
   enabled: boolean;
   costPerGeneration: number;
+  billingMode: 'per_call' | 'per_second';
+  billingPrice: number;
+  billingUnit: number;
+  imageUrl: string;
   sortOrder: number;
 };
 
@@ -219,6 +225,12 @@ const CHANNEL_FORM_GUIDES: Record<ImageAdminChannelType, {
     hint: '一般只需要创建一个默认模型，支持图生图时可开启参考图。',
     recommendedAction: '先创建默认模型，再微调能力开关',
   },
+  'lingke-media': {
+    defaultName: '灵刻媒体',
+    summary: '适合接入灵刻 AI 的统一媒体接口，支持图片异步生成。',
+    hint: 'Base URL 填 https://api.lingkeai.ai，模型可直接使用站点显示名。',
+    recommendedAction: '先保存渠道，再导入灵刻图像模型',
+  },
 };
 
 const MANUAL_PRESET_OPTIONS: Record<ImageAdminChannelType, ModelPresetOption[]> = {
@@ -253,6 +265,10 @@ const MANUAL_PRESET_OPTIONS: Record<ImageAdminChannelType, ModelPresetOption[]> 
   ],
   sora: [
     { id: 'general', label: '默认生图', description: '默认填充 Sora Image 的推荐配置。' },
+  ],
+  'lingke-media': [
+    { id: 'general', label: '灵刻文生图', description: '默认填充灵刻媒体图片模型。' },
+    { id: 'edit', label: '灵刻参考图', description: '默认填充支持参考图的灵刻模型。' },
   ],
 };
 
@@ -307,6 +323,10 @@ function createEmptyModelForm(): ModelFormState {
     highlight: false,
     enabled: true,
     costPerGeneration: 10,
+    billingMode: 'per_call',
+    billingPrice: 10,
+    billingUnit: 1,
+    imageUrl: '',
     sortOrder: 0,
   };
 }
@@ -442,6 +462,7 @@ export default function ImageChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(false);
   const [expandedChannels, setExpandedChannels] = useState<Set<string>>(new Set());
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   
@@ -513,6 +534,26 @@ export default function ImageChannelsPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+
+  const bootstrapPresets = async () => {
+    setBootstrapping(true);
+    try {
+      const res = await fetch('/api/admin/bootstrap-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'image' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '生成失败');
+      toast({ title: data.data?.count ? `已生成 ${data.data.count} 个图像预置` : '图像预置已存在' });
+      loadData();
+    } catch (err) {
+      toast({ title: '生成预置失败', description: err instanceof Error ? err.message : '未知错误', variant: 'destructive' });
+    } finally {
+      setBootstrapping(false);
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -664,6 +705,10 @@ export default function ImageChannelsPage() {
       highlight: model.highlight || false,
       enabled: model.enabled,
       costPerGeneration: model.costPerGeneration,
+      billingMode: (model.billingMode as 'per_call' | 'per_second') || 'per_call',
+      billingPrice: model.billingPrice || model.costPerGeneration || 10,
+      billingUnit: model.billingUnit || 1,
+      imageUrl: model.imageUrl || '',
       sortOrder: model.sortOrder,
     });
     if (model.features.imageSize) {
@@ -839,6 +884,10 @@ export default function ImageChannelsPage() {
         highlight: modelForm.highlight,
         enabled: modelForm.enabled,
         costPerGeneration: modelForm.costPerGeneration,
+        billingMode: modelForm.billingMode,
+        billingPrice: modelForm.billingPrice,
+        billingUnit: modelForm.billingUnit,
+        imageUrl: modelForm.imageUrl || undefined,
         sortOrder: modelForm.sortOrder,
       };
 
@@ -1042,6 +1091,10 @@ export default function ImageChannelsPage() {
             defaultImageSize: group.features.imageSize ? (group.imageSizes.includes('1K') ? '1K' : group.imageSizes[0]) : undefined,
             enabled: true,
             costPerGeneration: 10,
+            billingMode: 'per_call',
+            billingPrice: 10,
+            billingUnit: 1,
+            imageUrl: '/huantu-logo.jpg',
             sortOrder: nextSortOrder,
           }),
         });
@@ -1070,6 +1123,10 @@ export default function ImageChannelsPage() {
             defaultAspectRatio: '1:1',
             enabled: true,
             costPerGeneration: 10,
+            billingMode: 'per_call',
+            billingPrice: 10,
+            billingUnit: 1,
+            imageUrl: '/huantu-logo.jpg',
             sortOrder: nextSortOrder,
           }),
         });
@@ -1338,12 +1395,57 @@ export default function ImageChannelsPage() {
                 </button>
               </div>
             </div>
+            <div className="space-y-2 md:col-span-2">
+              <label className="text-sm text-foreground/70">模型图片 URL</label>
+              <input
+                type="text"
+                value={modelForm.imageUrl}
+                onChange={(e) => setModelForm({ ...modelForm, imageUrl: e.target.value })}
+                placeholder="https://.../model-cover.png 或 /huantu-logo.jpg"
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+              />
+              {modelForm.imageUrl ? (
+                <div className="mt-2 h-24 w-40 overflow-hidden rounded-xl border border-border/60 bg-card/70">
+                  <img src={modelForm.imageUrl} alt="模型图片预览" className="h-full w-full object-cover" />
+                </div>
+              ) : null}
+            </div>
             <div className="space-y-2">
-              <label className="text-sm text-foreground/70">每次消耗积分</label>
+              <label className="text-sm text-foreground/70">兼容旧积分字段</label>
               <input
                 type="number"
                 value={modelForm.costPerGeneration}
                 onChange={(e) => setModelForm({ ...modelForm, costPerGeneration: parseInt(e.target.value) || 10 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费方式</label>
+              <select
+                value={modelForm.billingMode}
+                onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              >
+                <option value="per_call" className="bg-card/95">按次</option>
+                <option value="per_second" className="bg-card/95">按秒</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">计费价格</label>
+              <input
+                type="number"
+                value={modelForm.billingPrice}
+                onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 10 })}
+                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-foreground/70">{modelForm.billingMode === 'per_second' ? '每多少秒' : '计费单位'}</label>
+              <input
+                type="number"
+                min="1"
+                value={modelForm.billingUnit}
+                onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
                 className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
               />
             </div>
@@ -1955,13 +2057,24 @@ export default function ImageChannelsPage() {
                         channelModels.map(model => (
                           <div key={model.id} className="flex items-center justify-between p-3 bg-card/60 rounded-xl hover:bg-card/70 transition-colors">
                             <div className="flex items-center gap-3">
-                              <ImageIcon className="w-4 h-4 text-sky-400" />
+                              {model.imageUrl ? (
+                                <img src={model.imageUrl} alt={model.name} className="h-11 w-16 rounded-xl border border-border/60 object-cover" />
+                              ) : (
+                                <div className="flex h-11 w-16 items-center justify-center rounded-xl border border-border/60 bg-card/70"><ImageIcon className="w-4 h-4 text-sky-400" /></div>
+                              )}
                               <div>
                                 <div className="flex items-center gap-2">
                                   <span className="text-foreground font-medium">{model.name}</span>
                                   {model.highlight && <span className="px-1.5 py-0.5 text-xs rounded bg-yellow-500/20 text-yellow-400">推荐</span>}
                                 </div>
-                                <p className="text-xs text-foreground/40">{model.apiModel} · {model.costPerGeneration} 积分</p>
+                                <p className="text-xs text-foreground/40">
+                                  {model.apiModel} · {formatBillingSummary({
+                                    billingMode: model.billingMode,
+                                    billingPrice: model.billingPrice,
+                                    billingUnit: model.billingUnit,
+                                    legacyCost: model.costPerGeneration,
+                                  })}
+                                </p>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
@@ -1996,4 +2109,3 @@ export default function ImageChannelsPage() {
     </div>
   );
 }
-

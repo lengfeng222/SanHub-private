@@ -21,6 +21,7 @@ import { InlineToggle } from '@/components/generator/inline-toggle';
 import { ReferenceImageInput } from '@/components/generator/reference-image-input';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
 import { CustomSelect } from '@/components/ui/select-custom';
+import { ModelPreview, getImageModelPreviewMeta } from '@/components/model/model-preview';
 import {
   buildTaskFromGeneration,
   deleteGenerationRecord,
@@ -895,6 +896,7 @@ export function ImageGenerationPage({
                   label: model.name,
                   description: model.description,
                   highlight: model.highlight,
+                  icon: <ModelPreview {...getImageModelPreviewMeta(model)} />,
                 }))}
                 placeholder="选择模型"
               />

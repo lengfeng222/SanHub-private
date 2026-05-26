@@ -16,6 +16,7 @@ import { fetchWithRetry } from './http-retry';
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const PUBLIC_RUNTIME_MEDIA_DIR = path.join(process.cwd(), 'public', 'runtime-media');
 const MAX_REMOTE_MEDIA_BYTES = Math.max(
   1,
   Number(process.env.MEDIA_REMOTE_CACHE_MAX_BYTES) || 512 * 1024 * 1024
@@ -29,6 +30,10 @@ type SaveMediaOptions = {
 // 确保目录存在
 async function ensureMediaDir(): Promise<void> {
   await fsp.mkdir(MEDIA_DIR, { recursive: true });
+}
+
+async function ensurePublicRuntimeMediaDir(): Promise<void> {
+  await fsp.mkdir(PUBLIC_RUNTIME_MEDIA_DIR, { recursive: true });
 }
 
 // 从 data URL 中提取 mime 类型和数据
@@ -52,12 +57,43 @@ function getExtension(mimeType: string): string {
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
     'video/webm': 'webm',
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/ogg': 'ogg',
+    'audio/webm': 'webm',
   };
   return map[mimeType] || 'bin';
 }
 
 function isRemoteUrl(value: string): boolean {
   return value.startsWith('http://') || value.startsWith('https://');
+}
+
+function sanitizeFilename(filename: string): string {
+  const base = path.basename(filename || '');
+  return base.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function normalizePublicBaseUrl(raw?: string): string | null {
+  const value = String(raw || '').trim().replace(/\/+$/, '');
+  if (!value || !/^https?:\/\//i.test(value)) return null;
+
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1'
+    ) {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
 }
 
 function filenameFromUrl(id: string, mediaUrl: string, mimeType: string): string {
@@ -77,7 +113,7 @@ async function downloadRemoteMedia(mediaUrl: string): Promise<{ buffer: Buffer; 
   const response = await fetchWithRetry(fetch, mediaUrl, () => ({
     method: 'GET',
     headers: {
-      Accept: 'image/*,video/*,*/*',
+      Accept: 'image/*,video/*,audio/*,*/*',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     },
   }), {
@@ -217,6 +253,45 @@ export async function saveMediaAsync(
   return await saveMediaToFile(id, dataUrl);
 }
 
+export async function saveMediaToPublicFile(
+  id: string,
+  input: string,
+  options: SaveMediaOptions = {}
+): Promise<string | null> {
+  const publicBaseUrl = normalizePublicBaseUrl(
+    options.publicBaseUrl || process.env.NEXTAUTH_URL || process.env.APP_URL
+  );
+  if (!publicBaseUrl) {
+    return null;
+  }
+
+  let buffer: Buffer;
+  let mimeType: string;
+
+  if (isRemoteUrl(input)) {
+    const remote = await downloadRemoteMedia(input);
+    buffer = remote.buffer;
+    mimeType = remote.mimeType;
+  } else {
+    const parsed = parseDataUrl(input);
+    if (!parsed) {
+      return null;
+    }
+    buffer = Buffer.from(parsed.data, 'base64');
+    mimeType = parsed.mimeType;
+  }
+
+  await ensurePublicRuntimeMediaDir();
+
+  const filename = sanitizeFilename(
+    options.filename || `${id}.${getExtension(mimeType)}`
+  );
+  const filepath = path.join(PUBLIC_RUNTIME_MEDIA_DIR, filename);
+  await fsp.writeFile(filepath, buffer);
+
+  return `${publicBaseUrl}/runtime-media/${encodeURIComponent(filename)}`;
+}
+
 /**
  * 读取媒体文件
  * @param identifier 文件标识符（file:xxx.png 格式）或完整路径
@@ -248,6 +323,9 @@ export async function readMediaFile(
       webp: 'image/webp',
       mp4: 'video/mp4',
       webm: 'video/webm',
+      mp3: 'audio/mpeg',
+      wav: 'audio/wav',
+      ogg: 'audio/ogg',
     };
 
     const mimeType = mimeTypes[ext] || 'application/octet-stream';

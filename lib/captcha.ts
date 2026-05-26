@@ -2,8 +2,7 @@
 // 简单验证码生成器
 // ========================================
 
-// 验证码存储（内存存储，生产环境建议使用 Redis）
-const captchaStore = new Map<string, { code: string; expires: number }>();
+import { deleteCaptchaCode, getCaptchaCode, saveCaptchaCode } from '@/lib/db-captchas';
 
 // 生成随机验证码
 export function generateCaptchaCode(length = 4): string {
@@ -21,38 +20,26 @@ export function generateCaptchaId(): string {
 }
 
 // 存储验证码
-export function storeCaptcha(id: string, code: string, ttl = 300000): void {
-  // 清理过期的验证码
+export async function storeCaptcha(id: string, code: string, ttl = 300000): Promise<void> {
   const now = Date.now();
-  const keysToDelete: string[] = [];
-  captchaStore.forEach((value, key) => {
-    if (value.expires < now) {
-      keysToDelete.push(key);
-    }
-  });
-  keysToDelete.forEach((key) => captchaStore.delete(key));
-
-  captchaStore.set(id, {
-    code: code.toUpperCase(),
-    expires: now + ttl, // 默认5分钟过期
-  });
+  await saveCaptchaCode(id, code, now + ttl);
 }
 
 // 验证验证码
-export function verifyCaptcha(id: string, code: string): boolean {
-  const stored = captchaStore.get(id);
+export async function verifyCaptcha(id: string, code: string): Promise<boolean> {
+  const stored = await getCaptchaCode(id);
   if (!stored) return false;
   
   // 检查是否过期
-  if (stored.expires < Date.now()) {
-    captchaStore.delete(id);
+  if (Number(stored.expires_at || 0) < Date.now()) {
+    await deleteCaptchaCode(id);
     return false;
   }
   
   // 验证后删除（一次性使用）
-  captchaStore.delete(id);
+  await deleteCaptchaCode(id);
   
-  return stored.code === code.toUpperCase();
+  return String(stored.code || '') === code.toUpperCase();
 }
 
 // 生成验证码SVG图片
@@ -104,10 +91,13 @@ export function generateCaptchaSvg(code: string): string {
 }
 
 // 创建验证码（返回ID和SVG）
-export function createCaptcha(): { id: string; svg: string } {
+export async function createCaptcha(): Promise<{ id: string; svg: string }> {
   const id = generateCaptchaId();
   const code = generateCaptchaCode();
-  storeCaptcha(id, code);
+  await storeCaptcha(id, code);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[Captcha Debug] ${id} => ${code}`);
+  }
   const svg = generateCaptchaSvg(code);
   
   return { id, svg };

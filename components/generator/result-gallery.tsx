@@ -19,6 +19,7 @@ import type { Generation } from '@/types';
 import { formatDate } from '@/lib/utils';
 import { downloadAsset } from '@/lib/download';
 import { toast } from '@/components/ui/toaster';
+import { resolveVideoModelLabel } from '@/lib/video-model-label';
 
 // 任务类型
 export interface Task {
@@ -33,11 +34,18 @@ export interface Task {
   result?: Generation;
   createdAt: number;
   persisted?: boolean;
+  upstreamTaskId?: string;
+  upstreamStatus?: string;
+  upstreamState?: string;
+  upstreamStatusGroup?: string;
+  upstreamProgress?: number;
+  upstreamUpdatedAt?: number;
 }
 
 interface ResultGalleryProps {
   generations: Generation[];
   tasks?: Task[];
+  videoModelMap?: Map<string, string>;
   onRemoveTask?: (taskId: string) => void;
   onClearFailedTasks?: () => void;
   onRemoveGeneration?: (generation: Generation) => void;
@@ -49,6 +57,7 @@ interface ResultGalleryProps {
 export function ResultGallery({
   generations,
   tasks = [],
+  videoModelMap,
   onRemoveTask,
   onClearFailedTasks,
   onRemoveGeneration,
@@ -86,6 +95,36 @@ export function ResultGallery({
   const isVideo = (gen: Generation) => gen.type.includes('video');
   const canReuse = (gen: Generation) => !isVideo(gen) && typeof onReuseGeneration === 'function';
   const isTaskVideo = (task: Task) => task.type?.includes('video') || task.model?.includes('video');
+  const getTaskModelLabel = (task: Task) => {
+    if (!isTaskVideo(task)) return task.model || '';
+    return resolveVideoModelLabel({
+      modelId: task.modelId,
+      model: task.model,
+      modelNameMap: videoModelMap,
+    });
+  };
+  const getGenerationModelLabel = (generation: Generation) => {
+    if (!isVideo(generation)) return String(generation.params?.model || '');
+    return resolveVideoModelLabel({
+      modelId: typeof generation.params?.modelId === 'string' ? generation.params.modelId : undefined,
+      model: typeof generation.params?.model === 'string' ? generation.params.model : undefined,
+      modelNameMap: videoModelMap,
+    });
+  };
+  const getTaskStateLabel = (task: Task) => {
+    if (task.upstreamStatus) return task.upstreamStatus;
+    return task.status === 'processing' ? '生成中...' : '排队中...';
+  };
+  const getTaskStatusHint = (task: Task) => {
+    if (task.upstreamTaskId) {
+      return `上游任务 ${task.upstreamTaskId}`;
+    }
+    const modelLabel = getTaskModelLabel(task);
+    if (modelLabel) {
+      return modelLabel;
+    }
+    return '正在同步任务状态';
+  };
   const handleRemoveGeneration = (generation: Generation) => {
     if (!onRemoveGeneration) return;
     void onRemoveGeneration(generation);
@@ -144,10 +183,10 @@ export function ResultGallery({
                 <Sparkles className="w-5 h-5 text-foreground" />
               </div>
               <div>
-                <h2 className="text-lg font-medium text-foreground">生成结果</h2>
+                <h2 className="text-lg font-medium text-foreground">最近生成</h2>
                 <p className="text-sm text-foreground/40">
                   {activeTasks.length > 0 ? `${activeTasks.length} 个任务进行中 · ` : ''}
-                  {generations.length} 个作品
+                  {generations.length} 条结果
                   {failedCount > 0 ? ` · ${failedCount} 个错误` : ''}
                 </p>
               </div>
@@ -176,8 +215,8 @@ export function ResultGallery({
               <div className="w-16 h-16 bg-card/60 rounded-2xl flex items-center justify-center mb-4">
                 <ImageIcon className="w-8 h-8 text-foreground/30" />
               </div>
-              <p className="text-foreground/50">暂无生成结果</p>
-              <p className="text-foreground/30 text-sm mt-1">开始创作你的第一个作品</p>
+              <p className="text-foreground/50">暂无生成任务</p>
+              <p className="text-foreground/30 text-sm mt-1">生成完成的作品会显示在这里，请先选择模型并填写创作描述</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4 2xl:grid-cols-5">
@@ -190,9 +229,7 @@ export function ResultGallery({
                   {/* 加载动画背景 */}
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-sky-500/10 to-emerald-500/10">
                     <Loader2 className="w-8 h-8 text-foreground/60 animate-spin mb-2" />
-                    <p className="text-xs text-foreground/60">
-                      {task.status === 'processing' ? '生成中...' : '排队中...'}
-                    </p>
+                    <p className="text-xs text-foreground/75">{getTaskStateLabel(task)}</p>
                     {/* 进度显示 */}
                     {typeof task.progress === 'number' && task.progress > 0 && (
                       <div className="mt-2 w-24">
@@ -205,6 +242,9 @@ export function ResultGallery({
                         <p className="text-[10px] text-foreground/50 text-center mt-1">{task.progress}%</p>
                       </div>
                     )}
+                    <p className="mt-2 max-w-[86%] truncate text-[10px] text-foreground/45">
+                      {getTaskStatusHint(task)}
+                    </p>
                   </div>
                   {/* 任务类型标签 */}
                   <div className="absolute top-2 left-2 px-2 py-1 bg-sky-500/40 backdrop-blur-sm rounded-md flex items-center gap-1">
@@ -232,6 +272,9 @@ export function ResultGallery({
                   {/* 提示词 */}
                   <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-background/80 via-background/30 to-transparent">
                     <p className="text-xs text-foreground/80 truncate">{task.prompt || '无提示词'}</p>
+                    {getTaskModelLabel(task) ? (
+                      <p className="mt-1 truncate text-[10px] text-foreground/45">{getTaskModelLabel(task)}</p>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -255,6 +298,9 @@ export function ResultGallery({
                         <p className="text-xs text-red-300/70 mt-1 px-4 text-center truncate max-w-full">
                           {task.errorMessage}
                         </p>
+                        {task.upstreamTaskId ? (
+                          <p className="mt-2 text-[10px] text-red-200/45">上游任务 {task.upstreamTaskId}</p>
+                        ) : null}
                         <p className="text-[10px] text-red-300/50 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           点击查看详情
                         </p>
@@ -275,6 +321,9 @@ export function ResultGallery({
                   )}
                   <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-background/80 via-background/30 to-transparent">
                     <p className="text-xs text-foreground/80 truncate">{task.prompt || '无提示词'}</p>
+                    {getTaskModelLabel(task) ? (
+                      <p className="mt-1 truncate text-[10px] text-foreground/45">{getTaskModelLabel(task)}</p>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -286,7 +335,17 @@ export function ResultGallery({
                   className="group relative aspect-video bg-card/60 rounded-xl overflow-hidden cursor-pointer border border-border/70 hover:border-border transition-all"
                   onClick={() => setSelected(gen)}
                 >
-                  {isVideo(gen) ? (
+                  {!gen.resultUrl ? (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-sky-500/10 to-emerald-500/10 text-foreground/65">
+                      <Loader2 className="mb-3 h-8 w-8 animate-spin" />
+                      <p className="text-xs font-medium">
+                        {gen.status === 'completed' ? '媒体同步中' : '处理中'}
+                      </p>
+                      <p className="mt-1 max-w-[84%] truncate text-[10px] text-foreground/40">
+                        {getGenerationModelLabel(gen) || '生成结果正在同步'}
+                      </p>
+                    </div>
+                  ) : isVideo(gen) ? (
                     <>
                       <video
                         src={gen.resultUrl}
@@ -479,6 +538,17 @@ export function ResultGallery({
                   </div>
                 </div>
 
+                {getGenerationModelLabel(selected) ? (
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-foreground/40">模型</p>
+                    <div className="rounded-xl border border-border/70 bg-card/40 p-3">
+                      <p className="text-sm leading-relaxed text-foreground/80 break-words">
+                        {getGenerationModelLabel(selected)}
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="space-y-1">
                   <p className="text-xs font-medium text-foreground/40">
                     资源地址
@@ -620,10 +690,10 @@ export function ResultGallery({
                 </div>
               )}
 
-              {selectedFailedTask.model && (
+              {getTaskModelLabel(selectedFailedTask) && (
                 <div>
                   <p className="text-xs text-foreground/50 mb-1">模型</p>
-                  <p className="text-sm text-foreground/70">{selectedFailedTask.model}</p>
+                  <p className="text-sm text-foreground/70">{getTaskModelLabel(selectedFailedTask)}</p>
                 </div>
               )}
             </div>

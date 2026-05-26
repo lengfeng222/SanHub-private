@@ -286,6 +286,10 @@ function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoMo
       : undefined,
     highlight: model.highlight,
     enabled: model.enabled,
+    billingMode: model.billingMode,
+    billingPrice: model.billingPrice,
+    billingUnit: model.billingUnit,
+    imageUrl: model.imageUrl,
   };
 }
 
@@ -311,6 +315,10 @@ function toMergedVeoModel(models: VideoModel[], channel: VideoChannel): SafeVide
     defaultDuration: USER_VIDEO_DURATION_VALUE,
     highlight: models.some((model) => model.highlight),
     enabled: models.some((model) => model.enabled),
+    billingMode: representative.billingMode,
+    billingPrice: representative.billingPrice,
+    billingUnit: representative.billingUnit,
+    imageUrl: representative.imageUrl || models.find((model) => model.imageUrl)?.imageUrl,
   };
 }
 

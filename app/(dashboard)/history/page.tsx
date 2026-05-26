@@ -1,1663 +1,485 @@
 'use client';
+
 /* eslint-disable @next/next/no-img-element */
 
-import { useState, useEffect, useRef, useCallback, useMemo, memo, type CSSProperties } from 'react';
-import { useSession } from 'next-auth/react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Download,
-  Trash2,
-  Play,
-  Video,
-  Image as ImageIcon,
-  X,
-  Check,
-  CheckSquare,
-  Square,
-  Copy,
-  User,
-  History,
-  Maximize2,
-  Loader2,
-  Edit3,
+  CircleAlert,
+  Clock3,
   ExternalLink,
-  Droplets,
+  Headphones,
+  Image as ImageIcon,
+  Loader2,
+  Play,
+  Trash2,
+  User,
+  Video,
 } from 'lucide-react';
-import { toast } from '@/components/ui/toaster';
-import type { Generation, CharacterCard, SafeImageModel, SafeVideoModel } from '@/types';
-import { formatDate } from '@/lib/utils';
-import { downloadAsset } from '@/lib/download';
-import {
-  fetchPendingGenerationTasks,
-  isTerminalGenerationStatus,
-  mergeGenerationsById,
-  pollGenerationTask,
-  replaceActiveTasks,
-} from '@/lib/generation-client';
-import {
-  getFriendlyErrorMessage,
-} from '@/lib/polling-utils';
+import type { Generation, SafeVideoModel } from '@/types';
+import { resolveVideoModelLabel } from '@/lib/video-model-label';
+import { cn } from '@/lib/utils';
 
-// 任务类型
-interface Task {
-  id: string;
-  prompt: string;
-  type: string;
-  status: 'pending' | 'processing';
-  progress?: number; // 0-100
-  modelId?: string;
-  model?: string;
-  createdAt: number;
-  updatedAt?: number;
+const tabs = [
+  { key: 'all', label: '全部' },
+  { key: 'video', label: '视频' },
+  { key: 'image', label: '图像' },
+  { key: 'audio', label: '音频' },
+  { key: 'character', label: '角色卡' },
+] as const;
+
+const statusLabelMap: Record<Generation['status'], string> = {
+  pending: '排队中',
+  processing: '生成中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+};
+
+function isVideoItem(item: Generation) {
+  return item.type.includes('video');
 }
 
-type Badge = {
-  label: string;
-  icon: any;
-};
+function isImageItem(item: Generation) {
+  return item.type.includes('image');
+}
 
-// 纯函数 - 移到组件外部避免重复创建
-const isVideoType = (gen: Generation) => gen.type.includes('video');
-const isTaskVideoType = (type: string) => type?.includes('video');
+function isAudioItem(item: Generation) {
+  return item.type === 'music' || item.type === 'voice';
+}
 
-const CHARACTER_BADGE: Badge = { label: '角色卡', icon: User };
-const FALLBACK_VIDEO_BADGE: Badge = { label: '视频', icon: Video };
-const FALLBACK_IMAGE_BADGE: Badge = { label: '图像', icon: ImageIcon };
-const HISTORY_PAGE_SIZE = 24;
-const HISTORY_RESYNC_INTERVAL_MS = 30_000;
-const MEDIA_ROOT_MARGIN = '600px 0px';
-const HISTORY_STATUS_FILTER = 'completed';
-const CARD_CONTAIN_STYLE: CSSProperties = {
-  contentVisibility: 'auto',
-  containIntrinsicSize: '240px 135px',
-};
+function isCharacterItem(item: Generation) {
+  return item.type === 'character-card';
+}
 
-type HistoryFilter = 'all' | 'video' | 'image' | 'character';
-type HistoryMediaKind = 'all' | 'video' | 'image';
+function getTypeLabel(item: Generation) {
+  if (isVideoItem(item)) return '视频';
+  if (isImageItem(item)) return '图像';
+  if (isAudioItem(item)) return '音频';
+  if (isCharacterItem(item)) return '角色卡';
+  return item.type;
+}
 
-const getHistoryMediaKind = (filter: HistoryFilter): HistoryMediaKind => {
-  if (filter === 'video' || filter === 'image') return filter;
-  return 'all';
-};
-
-const VIDEO_CHANNEL_BADGE_LABELS: Record<string, string> = {
-  sora: 'Sora 视频',
-  grok2api: 'Grok 视频',
-  flow2api: 'Veo 视频',
-  'openai-compatible': 'OpenAI 视频',
-};
-
-const IMAGE_CHANNEL_BADGE_LABELS: Record<string, string> = {
-  sora: 'Sora 图像',
-  gemini: 'Gemini 图像',
-  gitee: 'Gitee 图像',
-  modelscope: 'ModelScope 图像',
-  'openai-compatible': 'OpenAI 图像',
-  'openai-chat': 'OpenAI 图像',
-};
-
-const IMAGE_TYPE_BADGE_LABELS: Record<string, string> = {
-  'sora-image': 'Sora 图像',
-  'gemini-image': 'Gemini 图像',
-  'zimage-image': 'Gitee 图像',
-  'gitee-image': 'Gitee 图像',
-};
-
-const getVideoBadge = (channelType?: string): Badge => ({
-  label: VIDEO_CHANNEL_BADGE_LABELS[channelType || ''] || FALLBACK_VIDEO_BADGE.label,
-  icon: Video,
-});
-
-const getImageBadge = (channelType?: string, fallbackType?: string): Badge => ({
-  label:
-    IMAGE_CHANNEL_BADGE_LABELS[channelType || ''] ||
-    (fallbackType ? IMAGE_TYPE_BADGE_LABELS[fallbackType] : undefined) ||
-    FALLBACK_IMAGE_BADGE.label,
-  icon: ImageIcon,
-});
-
-const inferVideoBadge = (model?: string): Badge => {
-  const lower = (model || '').toLowerCase();
-  if (lower.includes('grok')) return getVideoBadge('grok2api');
-  if (lower.startsWith('veo_') || lower.includes('veo')) return getVideoBadge('flow2api');
-  if (lower.includes('sora')) return getVideoBadge('sora');
-  return FALLBACK_VIDEO_BADGE;
-};
-
-const inferImageBadge = (type: string, model?: string): Badge => {
-  const lower = (model || '').toLowerCase();
-  if (lower.includes('gemini')) return getImageBadge('gemini');
-  if (lower.includes('sora')) return getImageBadge('sora');
-  if (lower.includes('qwen') || lower.includes('flux')) return getImageBadge('modelscope');
-  if (lower.includes('z-image') || lower.includes('tongyi') || lower.includes('rmbg') || lower.includes('seedvr')) {
-    return getImageBadge('gitee');
+function getStatusBadgeClass(status: Generation['status']) {
+  switch (status) {
+    case 'completed':
+      return 'border-emerald-400/30 bg-emerald-500/12 text-emerald-200';
+    case 'failed':
+    case 'cancelled':
+      return 'border-red-400/30 bg-red-500/12 text-red-200';
+    case 'processing':
+      return 'border-sky-400/30 bg-sky-500/12 text-sky-200';
+    case 'pending':
+    default:
+      return 'border-amber-300/25 bg-amber-400/10 text-amber-100';
   }
-  return getImageBadge(undefined, type);
-};
-
-// 骨架屏组件
-const SkeletonCard = () => (
-  <div className="relative aspect-video bg-card/60 rounded-xl overflow-hidden border border-border/70 animate-pulse">
-    <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-white/10" />
-    <div className="absolute top-2 right-2 w-16 h-5 bg-card/70 rounded-md" />
-    <div className="absolute bottom-0 left-0 right-0 p-3 space-y-2">
-      <div className="h-3 bg-card/70 rounded w-3/4" />
-      <div className="h-2 bg-card/70 rounded w-1/3" />
-    </div>
-  </div>
-);
-
-function CollapsibleText({
-  text,
-  collapsedLines = 3,
-}: {
-  text: string;
-  collapsedLines?: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  const collapsedClassName = useMemo(() => {
-    if (collapsedLines === 1) return 'line-clamp-1';
-    if (collapsedLines === 2) return 'line-clamp-2';
-    if (collapsedLines === 4) return 'line-clamp-4';
-    if (collapsedLines === 5) return 'line-clamp-5';
-    if (collapsedLines === 6) return 'line-clamp-6';
-    return 'line-clamp-3';
-  }, [collapsedLines]);
-
-  return (
-    <div className="min-w-0">
-      <div
-        className={`text-foreground text-sm leading-relaxed whitespace-pre-wrap break-words min-w-0 ${expanded ? '' : collapsedClassName}`}
-      >
-        {text}
-      </div>
-      <div className="mt-2 flex items-center gap-2">
-        <button
-          onClick={() => setExpanded(v => !v)}
-          className="text-xs text-foreground/50 hover:text-foreground/80 hover:underline underline-offset-4 transition-colors"
-          type="button"
-        >
-          {expanded ? '收起' : '展开'}
-        </button>
-        <button
-          onClick={() => {
-            navigator.clipboard.writeText(text);
-            toast({ title: '已复制提示词' });
-          }}
-          className="inline-flex items-center gap-1 text-xs text-foreground/50 hover:text-foreground/80 transition-colors"
-          title="复制提示词"
-          type="button"
-        >
-          <Copy className="w-3.5 h-3.5" />
-          复制
-        </button>
-      </div>
-    </div>
-  );
 }
 
-// Memoized 卡片组件 - 避免不必要的重渲染
-interface GenerationCardProps {
-  gen: Generation;
-  badge: Badge;
-  isSelected: boolean;
-  selectMode: boolean;
-  onSelect: (id: string) => void;
-  onView: (gen: Generation) => void;
-}
+export default function HistoryPage() {
+  const [items, setItems] = useState<Generation[]>([]);
+  const [videoModels, setVideoModels] = useState<Pick<SafeVideoModel, 'id' | 'name'>[]>([]);
+  const [filter, setFilter] = useState<(typeof tabs)[number]['key']>('all');
+  const [loading, setLoading] = useState(true);
 
-const GenerationCard = memo(function GenerationCard({
-  gen,
-  badge,
-  isSelected,
-  selectMode,
-  onSelect,
-  onView,
-}: GenerationCardProps) {
-  const cardRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [imageLoaded, setImageLoaded] = useState(false);
-  const [hasRequestedMedia, setHasRequestedMedia] = useState(false);
-  const shouldLoadMedia = hasRequestedMedia;
+  const load = useCallback(async () => {
+    try {
+      const [historyRes, videoModelsRes] = await Promise.allSettled([
+        fetch('/api/user/history?limit=50', { cache: 'no-store' }),
+        fetch('/api/video-models', { cache: 'no-store' }),
+      ]);
 
-  useEffect(() => {
-    if (hasRequestedMedia) return;
+      if (historyRes.status === 'fulfilled') {
+        const historyData = await historyRes.value.json().catch(() => ({}));
+        if (historyRes.value.ok) {
+          setItems(historyData.data || []);
+        }
+      }
 
-    const element = cardRef.current;
-    if (!element) return;
-
-    if (typeof IntersectionObserver === 'undefined') {
-      setHasRequestedMedia(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry.isIntersecting) return;
-        setHasRequestedMedia(true);
-        observer.disconnect();
-      },
-      { rootMargin: MEDIA_ROOT_MARGIN }
-    );
-
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [hasRequestedMedia]);
-  
-  const handleClick = useCallback(() => {
-    if (selectMode) {
-      onSelect(gen.id);
-    } else {
-      onView(gen);
-    }
-  }, [selectMode, gen, onSelect, onView]);
-  
-  const handleMouseEnter = useCallback(() => {
-    if (!selectMode) {
-      setHasRequestedMedia(true);
-      window.setTimeout(() => {
-        videoRef.current?.play().catch(() => {});
-      }, 0);
-    }
-  }, [selectMode]);
-  
-  const handleMouseLeave = useCallback(() => {
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.currentTime = 0;
+      if (videoModelsRes.status === 'fulfilled') {
+        const modelsData = await videoModelsRes.value.json().catch(() => ({}));
+        if (videoModelsRes.value.ok) {
+          setVideoModels(
+            (modelsData.data?.models || []).map((item: SafeVideoModel) => ({
+              id: item.id,
+              name: item.name,
+            }))
+          );
+        }
+      }
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  return (
-    <div
-      ref={cardRef}
-      className={`group relative aspect-video bg-card/60 rounded-xl overflow-hidden cursor-pointer border transition-all ${
-        isSelected 
-          ? 'border-sky-500 ring-2 ring-sky-500/40' 
-          : 'border-border/70 hover:border-border'
-      }`}
-      style={CARD_CONTAIN_STYLE}
-      onClick={handleClick}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
-    >
-      {isVideoType(gen) ? (
-        <>
-          {shouldLoadMedia ? (
-            <video
-              ref={videoRef}
-              src={gen.resultUrl}
-              className="w-full h-full object-cover"
-              muted
-              loop
-              playsInline
-              preload="none"
-            />
-          ) : (
-            <div className="absolute inset-0 bg-gradient-to-br from-card/70 to-background/80" />
-          )}
-          <div className="absolute top-2 left-2 px-2 py-1 bg-background/60 backdrop-blur-sm rounded-md flex items-center gap-1">
-            <Play className="w-3 h-3 text-foreground" />
-            <span className="text-[10px] text-foreground">VIDEO</span>
-          </div>
-        </>
-      ) : (
-        <>
-          {!imageLoaded && (
-            <div className="absolute inset-0 bg-card/60 animate-pulse" />
-          )}
-          {shouldLoadMedia && (
-            <img
-              src={gen.resultUrl}
-              alt={gen.prompt}
-              className={`w-full h-full object-cover transition-opacity duration-300 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
-              loading="lazy"
-              decoding="async"
-              onLoad={() => setImageLoaded(true)}
-            />
-          )}
-        </>
-      )}
-      
-      {/* 选择模式下的复选框 */}
-      {selectMode && (
-        <div className="absolute top-2 left-2 z-10">
-          <div className={`w-6 h-6 rounded-md flex items-center justify-center transition-all ${
-            isSelected 
-              ? 'bg-sky-500' 
-              : 'bg-background/60 backdrop-blur-sm border border-border'
-          }`}>
-            {isSelected && <Check className="w-4 h-4 text-foreground" />}
-          </div>
-        </div>
-      )}
-      
-      {!selectMode && (
-        <div className="absolute inset-0 bg-background/70 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
-          <div className="w-12 h-12 bg-card/70 border border-border/70 backdrop-blur-sm rounded-full flex items-center justify-center">
-            <Maximize2 className="w-5 h-5 text-foreground" />
-          </div>
-        </div>
-      )}
-      <div className="absolute top-2 right-2">
-        <span className="px-2 py-1 bg-background/60 backdrop-blur-sm text-foreground text-[10px] rounded-md flex items-center gap-1">
-          <badge.icon className="w-3 h-3" />
-          {badge.label}
-        </span>
-      </div>
-      <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-background/80 via-background/30 to-transparent">
-        <p className="text-xs text-foreground/80 truncate">{gen.prompt || '无提示词'}</p>
-        <p className="text-[10px] text-foreground/40 mt-1">{formatDate(gen.createdAt)}</p>
-      </div>
-    </div>
-  );
-});
+  useEffect(() => {
+    void load();
 
-export default function HistoryPage() {
-  const { data: session, update } = useSession();
-  const [generations, setGenerations] = useState<Generation[]>([]);
-  const [pendingTasks, setPendingTasks] = useState<Task[]>([]);
-  const [videoModels, setVideoModels] = useState<SafeVideoModel[]>([]);
-  const [imageModels, setImageModels] = useState<SafeImageModel[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<Generation | null>(null);
-  const [filter, setFilter] = useState<HistoryFilter>('all');
-  const [characterCards, setCharacterCards] = useState<CharacterCard[]>([]);
-  const [selectMode, setSelectMode] = useState(false);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [deleting, setDeleting] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<'single' | 'batch' | 'all-media' | 'all-characters' | 'all-errors' | null>(null);
-  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
-  const [unwatermarking, setUnwatermarking] = useState(false);
-  const [unwatermarkUrl, setUnwatermarkUrl] = useState<string | null>(null);
-  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
-  const loadingRef = useRef(false);
-  const lastResyncAtRef = useRef(0);
-  const lastLoadedHistoryKindRef = useRef<HistoryMediaKind | null>(null);
-  const historyMediaKindRef = useRef<HistoryMediaKind>('all');
+    const intervalId = window.setInterval(() => {
+      void load();
+    }, 15000);
+    const handleFocus = () => {
+      void load();
+    };
 
-  const videoBadgeByModelId = useMemo(
-    () =>
-      Object.fromEntries(
-        videoModels.map((model) => [model.id, getVideoBadge(model.channelType)])
-      ) as Record<string, Badge>,
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [load]);
+
+  const stats = useMemo(() => {
+    const total = items.length;
+    const video = items.filter((item) => isVideoItem(item)).length;
+    const image = items.filter((item) => isImageItem(item)).length;
+    const audio = items.filter((item) => isAudioItem(item)).length;
+    const character = items.filter((item) => isCharacterItem(item)).length;
+    return { total, video, image, audio, character };
+  }, [items]);
+
+  const filtered = useMemo(() => {
+    switch (filter) {
+      case 'video':
+        return items.filter((item) => isVideoItem(item));
+      case 'image':
+        return items.filter((item) => isImageItem(item));
+      case 'audio':
+        return items.filter((item) => isAudioItem(item));
+      case 'character':
+        return items.filter((item) => isCharacterItem(item));
+      default:
+        return items;
+    }
+  }, [filter, items]);
+
+  const videoModelMap = useMemo(
+    () => new Map(videoModels.map((item) => [item.id, item.name])),
     [videoModels]
   );
 
-  const imageBadgeByModelId = useMemo(
-    () =>
-      Object.fromEntries(
-        imageModels.map((model) => [model.id, getImageBadge(model.channelType)])
-      ) as Record<string, Badge>,
-    [imageModels]
-  );
-
-  const imageBadgeByApiModel = useMemo(
-    () =>
-      Object.fromEntries(
-        imageModels.map((model) => [model.apiModel, getImageBadge(model.channelType)])
-      ) as Record<string, Badge>,
-    [imageModels]
-  );
-
-  const resolveGenerationBadge = useCallback(
-    (gen: Generation): Badge => {
-      if (gen.type === 'character-card') return CHARACTER_BADGE;
-
-      if (isVideoType(gen)) {
-        if (gen.params?.modelId && videoBadgeByModelId[gen.params.modelId]) {
-          return videoBadgeByModelId[gen.params.modelId];
-        }
-        return inferVideoBadge(gen.params?.model);
-      }
-
-      if (gen.params?.modelId && imageBadgeByModelId[gen.params.modelId]) {
-        return imageBadgeByModelId[gen.params.modelId];
-      }
-      if (gen.params?.model && imageBadgeByApiModel[gen.params.model]) {
-        return imageBadgeByApiModel[gen.params.model];
-      }
-      return inferImageBadge(gen.type, gen.params?.model);
-    },
-    [imageBadgeByApiModel, imageBadgeByModelId, videoBadgeByModelId]
-  );
-
-  const resolveTaskBadge = useCallback(
-    (task: Task): Badge => {
-      if (task.type === 'character-card') return CHARACTER_BADGE;
-
-      if (isTaskVideoType(task.type)) {
-        if (task.modelId && videoBadgeByModelId[task.modelId]) {
-          return videoBadgeByModelId[task.modelId];
-        }
-        return inferVideoBadge(task.model);
-      }
-
-      if (task.modelId && imageBadgeByModelId[task.modelId]) {
-        return imageBadgeByModelId[task.modelId];
-      }
-      if (task.model && imageBadgeByApiModel[task.model]) {
-        return imageBadgeByApiModel[task.model];
-      }
-      return inferImageBadge(task.type, task.model);
-    },
-    [imageBadgeByApiModel, imageBadgeByModelId, videoBadgeByModelId]
-  );
-
-  const historyMediaKind = getHistoryMediaKind(filter);
-
-  useEffect(() => {
-    historyMediaKindRef.current = historyMediaKind;
-  }, [historyMediaKind]);
-
-  const loadHistory = useCallback(async (
-    pageNum: number,
-    append = false,
-    force = false,
-    kindOverride?: HistoryMediaKind
-  ) => {
-    if (loadingRef.current && !force) return;
-    loadingRef.current = true;
-    
-    if (append) {
-      setLoadingMore(true);
-    } else {
-      setLoading(true);
-    }
-    
-    try {
-      // Add cache-busting timestamp to prevent browser caching
-      const timestamp = Date.now();
-      const requestKind = kindOverride || historyMediaKindRef.current;
-      const params = new URLSearchParams({
-        page: String(pageNum),
-        limit: String(HISTORY_PAGE_SIZE),
-        kind: requestKind,
-        status: HISTORY_STATUS_FILTER,
-        _t: String(timestamp),
-      });
-      const res = await fetch(`/api/user/history?${params.toString()}`, {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const newGenerations = data.data || [];
-        const terminalIds = new Set<string>(
-          newGenerations
-            .filter((generation: Generation) => isTerminalGenerationStatus(generation.status))
-            .map((generation: Generation) => generation.id)
-        );
-        
-        if (append) {
-          setGenerations((prev) => mergeGenerationsById(prev, newGenerations));
-        } else {
-          setPage(pageNum);
-          setGenerations(mergeGenerationsById([], newGenerations));
-        }
-
-        if (terminalIds.size > 0) {
-          setPendingTasks((prev) =>
-            prev.filter((task) => !terminalIds.has(task.id))
-          );
-        }
-        
-        setHasMore(Boolean(data.hasMore ?? newGenerations.length === HISTORY_PAGE_SIZE));
-      }
-    } catch (err) {
-      console.error('Failed to load history:', err);
-    } finally {
-      loadingRef.current = false;
-      setLoading(false);
-      setLoadingMore(false);
-    }
-  }, []);
-
-  const modelCatalogsLoadedRef = useRef(false);
-
-  const loadModelCatalogs = useCallback(async () => {
-    if (modelCatalogsLoadedRef.current) return;
-    try {
-      const [videoRes, imageRes] = await Promise.all([
-        fetch('/api/video-models'),
-        fetch('/api/image-models'),
-      ]);
-
-      if (videoRes.ok) {
-        const videoData = await videoRes.json();
-        setVideoModels(videoData.data?.models || []);
-      }
-
-      if (imageRes.ok) {
-        const imageData = await imageRes.json();
-        setImageModels(imageData.data?.models || []);
-      }
-      modelCatalogsLoadedRef.current = true;
-    } catch (err) {
-      console.error('Failed to load model catalogs:', err);
-    }
-  }, []);
-
-  // 加载角色卡
-  const loadCharacterCards = useCallback(async () => {
-    try {
-      const res = await fetch('/api/user/character-cards');
-      if (res.ok) {
-        const data = await res.json();
-        setCharacterCards(data.data || []);
-      }
-    } catch (err) {
-      console.error('Failed to load character cards:', err);
-    }
-  }, []);
-
-  const pollTaskStatus = useCallback(async (task: Task) => {
-    // 防止重复轮询
-    if (abortControllersRef.current.has(task.id)) return;
-
-    const controller = new AbortController();
-    abortControllersRef.current.set(task.id, controller);
-    const taskType = isTaskVideoType(task.type) ? 'video' : 'image';
-
-    try {
-      await pollGenerationTask({
-        taskId: task.id,
-        taskPrompt: task.prompt || '',
-        taskType,
-        signal: controller.signal,
-        onProgress: (payload) => {
-          const nextStatus =
-            payload.status === 'pending' || payload.status === 'processing'
-              ? payload.status
-              : 'processing';
-
-          setPendingTasks((prev) =>
-            prev.map((task) =>
-              task.id === payload.id
-                ? {
-                    ...task,
-                    status: nextStatus,
-                    progress:
-                      typeof payload.progress === 'number'
-                        ? payload.progress
-                        : task.progress,
-                    updatedAt: payload.updatedAt,
-                  }
-                : task
-            )
-          );
-        },
-        onCompleted: async () => {
-          setPendingTasks((prev) => prev.filter((pendingTask) => pendingTask.id !== task.id));
-          await update();
-          await Promise.allSettled([
-            loadPendingTasksRef.current(),
-            loadHistoryRef.current(1, false, true),
-          ]);
-        },
-        onFailed: async (errorMessage) => {
-          console.error('History polling failed:', getFriendlyErrorMessage(errorMessage));
-          setPendingTasks((prev) => prev.filter((pendingTask) => pendingTask.id !== task.id));
-          await Promise.allSettled([
-            loadPendingTasksRef.current(),
-            loadHistoryRef.current(1, false, true),
-          ]);
-        },
-        onTimeout: async () => {
-          setPendingTasks((prev) => prev.filter((pendingTask) => pendingTask.id !== task.id));
-          await Promise.allSettled([
-            loadPendingTasksRef.current(),
-            loadHistoryRef.current(1, false, true),
-          ]);
-        },
-      });
-    } finally {
-      abortControllersRef.current.delete(task.id);
-    }
-  }, [update]);
-
-  const loadPendingTasks = useCallback(async () => {
-    try {
-      const tasks: Task[] = (await fetchPendingGenerationTasks(50)).map((task) => ({
-        id: task.id,
-        prompt: task.prompt,
-        type: task.type,
-        status: task.status as 'pending' | 'processing',
-        progress: typeof task.progress === 'number' ? task.progress : 0,
-        modelId: task.modelId,
-        model: task.model,
-        createdAt: task.createdAt,
-        updatedAt: task.updatedAt,
-      }));
-
-      setPendingTasks((prev) => replaceActiveTasks(prev, tasks));
-
-      tasks.forEach((task) => {
-        void pollTaskStatus(task);
-      });
-    } catch (err) {
-      console.error('Failed to load pending tasks:', err);
-    }
-  }, [pollTaskStatus]);
-
-  // 初始加载 - 只在组件挂载时执行一次
-  const initialLoadRef = useRef(false);
-  useEffect(() => {
-    const abortControllers = abortControllersRef.current;
-    if (session?.user?.id && !initialLoadRef.current) {
-      initialLoadRef.current = true;
-      // Reset page to 1 on initial load
-      setPage(1);
-      setGenerations([]);
-      setHasMore(true);
-      lastResyncAtRef.current = Date.now();
-      const initialHistoryKind = historyMediaKindRef.current;
-      lastLoadedHistoryKindRef.current = initialHistoryKind;
-      loadHistory(1, false, true, initialHistoryKind); // force load
-      loadModelCatalogs();
-      loadPendingTasks();
-      let idleCallbackId: number | null = null;
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-      if (typeof window.requestIdleCallback === 'function') {
-        idleCallbackId = window.requestIdleCallback(() => {
-          void loadCharacterCards();
-        }, { timeout: 3000 });
-      } else {
-        timeoutId = setTimeout(() => {
-          void loadCharacterCards();
-        }, 1200);
-      }
-
-      return () => {
-        if (idleCallbackId !== null) {
-          window.cancelIdleCallback(idleCallbackId);
-        }
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        abortControllers.forEach(controller => controller.abort());
-        abortControllers.clear();
-      };
-    }
-
-    return () => {
-      abortControllers.forEach(controller => controller.abort());
-      abortControllers.clear();
-    };
-  }, [session?.user?.id, loadCharacterCards, loadHistory, loadModelCatalogs, loadPendingTasks]);
-
-  useEffect(() => {
-    if (!session?.user?.id || !initialLoadRef.current || filter === 'character') return;
-    if (lastLoadedHistoryKindRef.current === historyMediaKind) return;
-
-    lastLoadedHistoryKindRef.current = historyMediaKind;
-    setPage(1);
-    setGenerations([]);
-    setHasMore(true);
-    setSelectMode(false);
-    setSelectedIds(new Set());
-    void loadHistory(1, false, true, historyMediaKind);
-  }, [filter, historyMediaKind, loadHistory, session?.user?.id]);
-
-  // 使用 ref 保存 loadHistory 函数避免闭包问题
-  const loadHistoryRef = useRef(loadHistory);
-  useEffect(() => {
-    loadHistoryRef.current = loadHistory;
-  }, [loadHistory]);
-
-  const loadPendingTasksRef = useRef(loadPendingTasks);
-  useEffect(() => {
-    loadPendingTasksRef.current = loadPendingTasks;
-  }, [loadPendingTasks]);
-
-  useEffect(() => {
-    if (!session?.user?.id || !initialLoadRef.current) return;
-
-    const resync = () => {
-      const now = Date.now();
-      if (now - lastResyncAtRef.current < HISTORY_RESYNC_INTERVAL_MS) {
-        return;
-      }
-
-      lastResyncAtRef.current = now;
-      void loadPendingTasks();
-      void loadHistory(1, false, true);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        resync();
-      }
-    };
-
-    window.addEventListener('focus', resync);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      window.removeEventListener('focus', resync);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [loadHistory, loadPendingTasks, session?.user?.id]);
-
-  const downloadFile = async (url: string, id: string, type: string) => {
-    if (!url) {
-      toast({
-        title: '下载失败',
-        description: '文件地址不存在',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    const extension = type.includes('video') ? 'mp4' : 'png';
-    try {
-      await downloadAsset(url, `sanhub-${id}.${extension}`);
-    } catch (err) {
-      console.error('Download failed', err);
-      toast({
-        title: '下载失败',
-        description: '请稍后重试',
-        variant: 'destructive',
+  const getModelLabel = (item: Generation) => {
+    if (isVideoItem(item)) {
+      return resolveVideoModelLabel({
+        modelId: typeof item.params?.modelId === 'string' ? item.params.modelId : undefined,
+        model: typeof item.params?.model === 'string' ? item.params.model : undefined,
+        modelNameMap: videoModelMap,
       });
     }
+
+    if (isImageItem(item)) {
+      return (item.params?.model as string) || '图像生成';
+    }
+
+    if (item.type === 'music') return 'AI 音乐';
+    if (item.type === 'voice') return 'TTS 语音';
+    if (item.type === 'character-card') return '角色卡';
+    return item.type;
   };
 
-  // 去水印功能
-  const handleUnwatermark = async (permalink: string) => {
-    if (!permalink) {
-      toast({
-        title: '无法去水印',
-        description: '缺少视频分享链接',
-        variant: 'destructive',
-      });
-      return;
+  const getUpstreamStatusLabel = (item: Generation) => {
+    if (typeof item.params?.upstreamStatus === 'string' && item.params.upstreamStatus.trim()) {
+      return item.params.upstreamStatus.trim();
     }
-
-    setUnwatermarking(true);
-    setUnwatermarkUrl(null);
-
-    try {
-      const res = await fetch('/api/sora/unwatermark', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ permalink }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || '获取无水印链接失败');
-      }
-
-      setUnwatermarkUrl(data.data.download_link);
-      toast({
-        title: '去水印成功',
-        description: '已获取无水印下载链接',
-      });
-    } catch (error) {
-      console.error('Unwatermark failed:', error);
-      toast({
-        title: '去水印失败',
-        description: error instanceof Error ? error.message : '请稍后重试',
-        variant: 'destructive',
-      });
-    } finally {
-      setUnwatermarking(false);
+    if (typeof item.params?.upstreamState === 'string' && item.params.upstreamState.trim()) {
+      return item.params.upstreamState.trim();
     }
+    return '';
   };
 
-  // 删除失败记录
-  const handleDeleteFailed = async () => {
-    setDeleting(true);
-    try {
-      const res = await fetch('/api/user/history/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'all-errors' }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      toast({ title: '清除成功', description: `已删除 ${data.deletedCount} 条失败记录` });
-      setPage(1);
-      loadHistory(1);
-    } catch (error) {
-      toast({
-        title: '清除失败',
-        description: error instanceof Error ? error.message : '清除失败',
-        variant: 'destructive',
-      });
-    } finally {
-      setDeleting(false);
-      setShowDeleteConfirm(null);
+  const renderPreview = (item: Generation) => {
+    if (item.status === 'pending' || item.status === 'processing') {
+      const upstreamLabel = getUpstreamStatusLabel(item);
+      return (
+        <div className="flex h-full flex-col items-center justify-center bg-gradient-to-br from-sky-500/10 via-sky-500/6 to-emerald-500/10 text-white/70">
+          {item.status === 'processing' ? (
+            <Loader2 className="mb-3 h-8 w-8 animate-spin" />
+          ) : (
+            <Clock3 className="mb-3 h-8 w-8" />
+          )}
+          <p className="text-sm font-medium">{statusLabelMap[item.status]}</p>
+          <p className="mt-1 px-4 text-center text-xs text-white/40">
+            {upstreamLabel ? `上游：${upstreamLabel}` : '任务正在处理中，请稍后刷新'}
+          </p>
+        </div>
+      );
     }
-  };
 
-  // 删除媒体文件
-  const handleDeleteMedia = async (action: 'single' | 'batch' | 'all', id?: string) => {
-    setDeleting(true);
-    try {
-      const body: any = { action };
-      if (action === 'single' && id) {
-        body.id = id;
-      } else if (action === 'batch') {
-        body.ids = Array.from(selectedIds);
-      }
-
-      const res = await fetch('/api/user/history/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-
-      toast({
-        title: '删除成功',
-        description: `已删除 ${data.deletedCount} 个作品`,
-      });
-
-      // 刷新列表
-      setSelectedIds(new Set());
-      setSelectMode(false);
-      setPage(1);
-      loadHistory(1);
-    } catch (error) {
-      toast({
-        title: '删除失败',
-        description: error instanceof Error ? error.message : '删除失败',
-        variant: 'destructive',
-      });
-    } finally {
-      setDeleting(false);
-      setShowDeleteConfirm(null);
-      setDeleteTargetId(null);
+    if (item.status === 'failed' || item.status === 'cancelled') {
+      const upstreamLabel = getUpstreamStatusLabel(item);
+      return (
+        <div className="flex h-full flex-col items-center justify-center bg-red-500/10 px-4 text-red-200">
+          <CircleAlert className="mb-3 h-8 w-8" />
+          <p className="text-sm font-medium">{statusLabelMap[item.status]}</p>
+          <p className="mt-1 max-w-[92%] truncate text-xs text-red-200/65">
+            {item.errorMessage || (upstreamLabel ? `上游：${upstreamLabel}` : '生成未成功完成')}
+          </p>
+        </div>
+      );
     }
-  };
 
-  // 删除角色卡
-  const handleDeleteCharacters = async () => {
-    setDeleting(true);
-    try {
-      const res = await fetch('/api/user/character-cards/delete-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-
-      toast({
-        title: '删除成功',
-        description: `已删除 ${data.deletedCount} 个角色卡`,
-      });
-
-      // 刷新角色卡列表
-      loadCharacterCards();
-    } catch (error) {
-      toast({
-        title: '删除失败',
-        description: error instanceof Error ? error.message : '删除失败',
-        variant: 'destructive',
-      });
-    } finally {
-      setDeleting(false);
-      setShowDeleteConfirm(null);
+    if (!item.resultUrl) {
+      return (
+        <div className="flex h-full items-center justify-center bg-black/20 text-white/35">
+          <div className="text-center">
+            <ImageIcon className="mx-auto h-8 w-8" />
+            <p className="mt-2 text-xs text-white/35">媒体同步中</p>
+          </div>
+        </div>
+      );
     }
-  };
 
-  // 切换选择
-  const toggleSelect = useCallback((id: string) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  // 全选/取消全选
-  const toggleSelectAll = () => {
-    if (selectedIds.size === filteredGenerations.length) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(filteredGenerations.map(g => g.id)));
+    if (isVideoItem(item)) {
+      return (
+        <video
+          src={item.resultUrl}
+          className="h-full w-full object-cover"
+          muted
+          loop
+          playsInline
+          preload="metadata"
+          onMouseEnter={(event) => void event.currentTarget.play().catch(() => {})}
+          onMouseLeave={(event) => {
+            event.currentTarget.pause();
+            event.currentTarget.currentTime = 0;
+          }}
+        />
+      );
     }
+
+    if (isImageItem(item) || isCharacterItem(item)) {
+      return (
+        <img
+          src={item.resultUrl}
+          alt={item.prompt || getModelLabel(item)}
+          className="h-full w-full object-cover"
+          loading="lazy"
+          decoding="async"
+        />
+      );
+    }
+
+    if (isAudioItem(item)) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 px-4 text-white/75">
+          <Headphones className="h-8 w-8" />
+          <audio controls src={item.resultUrl} className="w-full max-w-[90%]" />
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex h-full items-center justify-center bg-black/20 text-white/35">
+        <ImageIcon className="h-8 w-8" />
+      </div>
+    );
   };
-
-  
-  // 缓存已完成作品的过滤结果
-  const completedGenerations = useMemo(() =>
-    generations.filter(g =>
-      g.resultUrl &&
-      g.status !== 'pending' &&
-      g.status !== 'processing'
-    ),
-    [generations]
-  );
-
-  // 缓存失败/取消的记录
-  const failedGenerations = useMemo(() =>
-    generations.filter(g =>
-      g.status === 'failed' || g.status === 'cancelled'
-    ),
-    [generations]
-  );
-
-  // 缓存过滤后的作品列表
-  const filteredGenerations = useMemo(() => {
-    if (filter === 'all') return completedGenerations;
-    if (filter === 'video') return completedGenerations.filter(g => isVideoType(g));
-    if (filter === 'character') return []; // 角色卡单独显示
-    return completedGenerations.filter(g => !isVideoType(g));
-  }, [completedGenerations, filter]);
-
-  
-  // 缓存已完成的角色卡
-  const completedCharacterCards = useMemo(() => 
-    characterCards.filter(c => c.status === 'completed'),
-    [characterCards]
-  );
-  
-  // 缓存进行中的角色卡任务（processing 状态）
-  const processingCharacterCards = useMemo(() => 
-    characterCards.filter(c => c.status === 'processing' || c.status === 'pending'),
-    [characterCards]
-  );
-  
-  // 缓存过滤后的 pending 任务
-  const filteredTasks = useMemo(() => {
-    if (filter === 'all') return pendingTasks;
-    if (filter === 'video') return pendingTasks.filter(t => isTaskVideoType(t.type));
-    return pendingTasks.filter(t => !isTaskVideoType(t.type));
-  }, [pendingTasks, filter]);
-
-  // 缓存统计数据
-  const stats = useMemo(() => ({
-    total: completedGenerations.length,
-    pending: pendingTasks.length,
-    videos: completedGenerations.filter(g => isVideoType(g)).length,
-    images: completedGenerations.filter(g => !isVideoType(g)).length,
-    characters: completedCharacterCards.length,
-    failed: failedGenerations.length,
-  }), [completedGenerations, pendingTasks.length, completedCharacterCards.length, failedGenerations.length]);
 
   return (
-    <>
-      <div className="max-w-7xl mx-auto flex flex-col h-[calc(100vh-100px)] pb-20 lg:pb-8">
-        {/* Header */}
-        <div className="shrink-0 flex flex-col md:flex-row md:items-end md:justify-between gap-3 lg:gap-4 mb-4">
-          <div>
-            <h1 className="text-2xl lg:text-3xl font-extralight text-foreground">创作历史</h1>
-            <p className="text-foreground/50 text-sm lg:text-base mt-0.5 font-light">查看和管理您的所有作品</p>
-          </div>
-          
-          {/* Stats - 移动端简化显示 */}
-          <div className="flex items-center gap-3 lg:gap-6 overflow-x-auto no-scrollbar -mx-2 px-2 lg:mx-0 lg:px-0">
-            {stats.pending > 0 && (
-              <>
-                <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-                  <p className="text-xl lg:text-2xl font-light text-sky-300">{stats.pending}</p>
-                  <p className="text-[10px] lg:text-xs text-foreground/40">进行中</p>
-                </div>
-                <div className="hidden lg:block w-px h-8 bg-card/70" />
-              </>
-            )}
-            <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-              <p className="text-xl lg:text-2xl font-light text-foreground">{stats.total}</p>
-              <p className="text-[10px] lg:text-xs text-foreground/40">总作品</p>
-            </div>
-            <div className="hidden lg:block w-px h-8 bg-card/70" />
-            <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-              <p className="text-xl lg:text-2xl font-light text-foreground">{stats.videos}</p>
-              <p className="text-[10px] lg:text-xs text-foreground/40">视频</p>
-            </div>
-            <div className="hidden lg:block w-px h-8 bg-card/70" />
-            <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-              <p className="text-xl lg:text-2xl font-light text-foreground">{stats.images}</p>
-              <p className="text-[10px] lg:text-xs text-foreground/40">图像</p>
-            </div>
-            <div className="hidden lg:block w-px h-8 bg-card/70" />
-            <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-              <p className="text-xl lg:text-2xl font-light text-emerald-300">{stats.characters}</p>
-              <p className="text-[10px] lg:text-xs text-foreground/40">角色卡</p>
-            </div>
-            {stats.failed > 0 && (
-              <>
-                <div className="hidden lg:block w-px h-8 bg-card/70" />
-                <div className="text-center min-w-[56px] lg:min-w-[72px] shrink-0">
-                  <p className="text-xl lg:text-2xl font-light text-red-400">{stats.failed}</p>
-                  <p className="text-[10px] lg:text-xs text-foreground/40">失败</p>
-                </div>
-              </>
-            )}
-          </div>
+    <div className="space-y-6 pb-8">
+      <div className="space-y-3">
+        <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs text-white/62 backdrop-blur-xl">
+          <Clock3 className="h-3.5 w-3.5 text-emerald-300" />
+          自动同步最近 50 条作品与上游状态
         </div>
+        <div>
+          <h1 className="text-[2.35rem] font-semibold tracking-[-0.05em] text-white sm:text-5xl">
+            作品库
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm text-white/48 sm:text-base">
+            统一查看视频、图像、音频与角色卡作品，支持快速预览、状态追踪和结果下载。
+          </p>
+        </div>
+      </div>
 
-        {/* Filter Tabs & Actions */}
-        <div className="shrink-0 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 lg:gap-4 mb-4">
-          <div className="flex items-center gap-1.5 lg:gap-2 overflow-x-auto no-scrollbar -mx-2 px-2">
-            {(['all', 'video', 'image', 'character'] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 lg:px-4 py-1.5 lg:py-2 rounded-lg text-xs lg:text-sm transition-all shrink-0 ${
-                  filter === f
-                    ? 'bg-foreground text-background'
-                    : 'bg-card/60 text-foreground/60 hover:bg-card/70 hover:text-foreground'
-                }`}
-              >
-                {f === 'all' ? '全部' : f === 'video' ? '视频' : f === 'image' ? '图像' : '角色卡'}
-              </button>
-            ))}
-          </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {[
+          ['总作品', stats.total, null],
+          ['视频', stats.video, 'video'],
+          ['图像', stats.image, 'image'],
+          ['音频', stats.audio, 'audio'],
+          ['角色卡', stats.character, 'character'],
+        ].map(([label, value, iconKey]) => {
+          const icon =
+            iconKey === 'video' ? <Video className="h-4 w-4" /> :
+            iconKey === 'image' ? <ImageIcon className="h-4 w-4" /> :
+            iconKey === 'audio' ? <Headphones className="h-4 w-4" /> :
+            iconKey === 'character' ? <User className="h-4 w-4" /> : null;
 
-          {/* 操作按钮 */}
-          <div className="flex flex-wrap items-center gap-2">
-            {selectMode ? (
-              <>
-                <button
-                  onClick={toggleSelectAll}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-card/60 text-foreground/60 rounded-lg text-sm hover:bg-card/70 hover:text-foreground transition-all"
-                >
-                  {selectedIds.size === filteredGenerations.length ? (
-                    <CheckSquare className="w-4 h-4" />
-                  ) : (
-                    <Square className="w-4 h-4" />
-                  )}
-                  {selectedIds.size > 0 ? `已选 ${selectedIds.size}` : '全选'}
-                </button>
-                <button
-                  onClick={() => setShowDeleteConfirm('batch')}
-                  disabled={selectedIds.size === 0 || deleting}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  删除选中
-                </button>
-                <button
-                  onClick={() => {
-                    setSelectMode(false);
-                    setSelectedIds(new Set());
-                  }}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-card/60 text-foreground/60 rounded-lg text-sm hover:bg-card/70 hover:text-foreground transition-all"
-                >
-                  <X className="w-4 h-4" />
-                  取消
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => setSelectMode(true)}
-                  disabled={filteredGenerations.length === 0 && filter !== 'character'}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-card/60 text-foreground/60 rounded-lg text-sm hover:bg-card/70 hover:text-foreground transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Edit3 className="w-4 h-4" />
-                  管理
-                </button>
-                <button
-                  onClick={() => setShowDeleteConfirm('all-media')}
-                  disabled={completedGenerations.length === 0 || deleting}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  清空媒体
-                </button>
-                <button
-                  onClick={() => setShowDeleteConfirm('all-characters')}
-                  disabled={completedCharacterCards.length === 0 || deleting}
-                  className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-emerald-500/15 text-emerald-300 rounded-lg text-sm hover:bg-emerald-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <User className="w-4 h-4" />
-                  清空角色卡
-                </button>
-                {stats.failed > 0 && (
+          return (
+            <div
+              key={String(label)}
+              className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(16,22,32,0.94),rgba(11,16,24,0.92))] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.22)] backdrop-blur-2xl"
+            >
+              <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-white/65">
+                {icon}
+              </div>
+              <div className="text-3xl font-semibold tracking-[-0.05em] text-white">
+                {Number(value).toLocaleString('zh-CN')}
+              </div>
+              <div className="mt-1 text-sm text-white/45">{String(label)}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <section className="overflow-hidden rounded-[32px] border border-white/10 bg-[#0d131c]/86 shadow-[0_24px_80px_rgba(0,0,0,0.28)] backdrop-blur-2xl">
+        <div className="border-b border-white/8 px-4 py-4 sm:px-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-2">
+              {tabs.map((tab) => {
+                const active = filter === tab.key;
+                return (
                   <button
-                    onClick={() => setShowDeleteConfirm('all-errors')}
-                    disabled={deleting}
-                    className="flex items-center gap-2 px-3 py-2 w-full sm:w-auto bg-red-500/15 text-red-300 rounded-lg text-sm hover:bg-red-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setFilter(tab.key)}
+                    className={cn(
+                      'rounded-full border px-4 py-2 text-sm font-medium transition',
+                      active
+                        ? 'border-emerald-400/30 bg-emerald-400/12 text-emerald-200 shadow-[0_0_0_1px_rgba(52,211,153,0.08)]'
+                        : 'border-white/10 bg-white/[0.03] text-white/55 hover:bg-white/[0.06] hover:text-white'
+                    )}
                   >
-                    <X className="w-4 h-4" />
-                    清除错误 ({stats.failed})
+                    {tab.label}
                   </button>
-                )}
-              </>
-            )}
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+              >
+                批量选择
+              </button>
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+              >
+                <Trash2 className="h-4 w-4" />
+                清空媒体
+              </button>
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+              >
+                <Trash2 className="h-4 w-4" />
+                清空角色卡
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 min-h-0 bg-card/60 border border-border/70 rounded-2xl overflow-hidden backdrop-blur-sm flex flex-col">
-          <div className={`shrink-0 p-4 sm:p-6 border-b border-border/70 ${filter === 'character' ? 'bg-gradient-to-r from-emerald-500/10 to-sky-500/10' : 'bg-gradient-to-r from-sky-500/10 to-emerald-500/10'}`}>
-            <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${filter === 'character' ? 'bg-gradient-to-br from-emerald-500/25 to-sky-500/25' : 'bg-gradient-to-br from-sky-500/25 to-emerald-500/25'}`}>
-                {filter === 'character' ? <User className="w-5 h-5 text-emerald-300" /> : <History className="w-5 h-5 text-sky-300" />}
-              </div>
-              <div>
-                <h2 className="text-lg font-medium text-foreground">{filter === 'character' ? '角色卡库' : '作品库'}</h2>
-                <p className="text-sm text-foreground/40">{filter === 'character' ? `${completedCharacterCards.length} 个角色` : `${filteredGenerations.length} 个作品`}</p>
-              </div>
+        <div className="px-4 py-5 sm:px-6">
+          <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-2xl font-semibold tracking-[-0.04em] text-white">作品库</h2>
+              <p className="mt-1 text-sm text-white/42">
+                当前筛选下共 {filtered.length.toLocaleString('zh-CN')} 个作品
+              </p>
             </div>
+            <p className="text-xs text-white/32">最近状态每 15 秒自动同步一次</p>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">
-            {loading ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <SkeletonCard key={i} />
-                ))}
+          {loading ? (
+            <div className="rounded-[26px] border border-dashed border-white/10 bg-[#0f141d] px-6 py-16 text-center text-sm text-white/35">
+              加载中...
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="flex min-h-[360px] flex-col items-center justify-center rounded-[26px] border border-dashed border-white/10 bg-[#0f141d] px-6 py-16 text-center">
+              <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.03] text-white/35">
+                <ImageIcon className="h-6 w-6" />
               </div>
-            ) : filter === 'character' ? (
-              // 角色卡专属显示
-              completedCharacterCards.length === 0 && processingCharacterCards.length === 0 ? (
-                <div className="h-64 flex flex-col items-center justify-center border border-dashed border-border/70 rounded-xl">
-                  <div className="w-16 h-16 bg-gradient-to-br from-emerald-500/10 to-sky-500/10 rounded-2xl flex items-center justify-center mb-4">
-                    <User className="w-8 h-8 text-emerald-300/50" />
-                  </div>
-                  <p className="text-foreground/40">暂无角色卡</p>
-                  <p className="text-foreground/30 text-sm mt-1">去视频页面生成你的第一个角色卡</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-                  {/* 进行中的角色卡任务 */}
-                  {processingCharacterCards.map((card) => (
-                    <div
-                      key={card.id}
-                      className="bg-card/60 border border-sky-500/30 rounded-xl overflow-hidden"
-                    >
-                      <div className="aspect-square bg-gradient-to-br from-emerald-500/10 to-sky-500/10 flex items-center justify-center relative">
-                        {card.avatarUrl ? (
-                          <img
-                            src={card.avatarUrl}
-                            alt="生成中..."
-                            className="w-full h-full object-cover"
-                            loading="lazy"
-                            decoding="async"
-                          />
+              <p className="text-xl font-medium text-white/72">暂无作品</p>
+              <p className="mt-2 max-w-md text-sm text-white/35">
+                生成完成的视频、图像、音频与角色卡会显示在这里
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {filtered.map((item) => {
+                const card = (
+                  <div className="group overflow-hidden rounded-[24px] border border-white/10 bg-[linear-gradient(180deg,rgba(17,23,33,0.96),rgba(12,17,24,0.92))] p-3 transition hover:-translate-y-0.5 hover:border-white/16 hover:bg-white/[0.04]">
+                    <div className="relative aspect-video overflow-hidden rounded-[20px] border border-white/8 bg-black/20">
+                      {renderPreview(item)}
+
+                      <div className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] text-white/88 backdrop-blur-md">
+                        {isVideoItem(item) ? (
+                          <Play className="h-3 w-3" />
+                        ) : isImageItem(item) ? (
+                          <ImageIcon className="h-3 w-3" />
+                        ) : isAudioItem(item) ? (
+                          <Headphones className="h-3 w-3" />
                         ) : (
-                          <User className="w-16 h-16 text-foreground/30" />
+                          <User className="h-3 w-3" />
                         )}
-                        <div className="absolute inset-0 bg-background/60 flex items-center justify-center">
-                          <Loader2 className="w-8 h-8 text-foreground animate-spin" />
-                        </div>
+                        {getTypeLabel(item)}
                       </div>
-                      <div className="p-3 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-sm font-medium text-foreground truncate">生成中...</h3>
-                          <span className="px-2 py-0.5 text-[10px] rounded-md bg-sky-500/15 text-sky-300">
-                            {card.status === 'processing' ? '生成中' : '等待中'}
-                          </span>
-                        </div>
-                        <p className="text-[10px] text-foreground/40">{formatDate(card.createdAt)}</p>
+
+                      <div
+                        className={cn(
+                          'absolute right-2 top-2 rounded-full border px-2.5 py-1 text-[11px] backdrop-blur-md',
+                          getStatusBadgeClass(item.status)
+                        )}
+                      >
+                        {statusLabelMap[item.status]}
                       </div>
                     </div>
-                  ))}
-                  {/* 已完成的角色卡 */}
-                  {completedCharacterCards.map((card) => (
-                    <CharacterCardHistoryItem key={card.id} card={card} />
-                  ))}
-                </div>
-              )
-            ) : filteredGenerations.length === 0 && filteredTasks.length === 0 ? (
-              <div className="h-64 flex flex-col items-center justify-center border border-dashed border-border/70 rounded-xl">
-                <div className="w-16 h-16 bg-card/60 rounded-2xl flex items-center justify-center mb-4">
-                  <ImageIcon className="w-8 h-8 text-foreground/30" />
-                </div>
-                <p className="text-foreground/40">暂无{filter === 'video' ? '视频' : filter === 'image' ? '图像' : ''}作品</p>
-                <p className="text-foreground/30 text-sm mt-1">开始创作你的第一个作品</p>
-              </div>
-            ) : (
-              <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {/* Pending 任务 */}
-                  {filteredTasks.map((task) => {
-                    const badge = resolveTaskBadge(task);
-                    return (
-                      <div
-                        key={task.id}
-                        className="group relative aspect-video bg-card/60 rounded-xl overflow-hidden border border-sky-500/30"
-                      >
-                        {/* 加载动画 */}
-                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-sky-500/10 to-emerald-500/10">
-                          <Loader2 className="w-8 h-8 text-foreground/60 animate-spin mb-2" />
-                          <p className="text-xs text-foreground/60">
-                            {task.status === 'processing' ? '生成中...' : '排队中...'}
-                          </p>
-                          {/* 进度显示 */}
-                          {typeof task.progress === 'number' && task.progress > 0 && (
-                            <div className="mt-2 w-24">
-                              <div className="h-1.5 bg-card/70 rounded-full overflow-hidden">
-                                <div 
-                                  className="h-full bg-gradient-to-r from-sky-500 to-emerald-500 transition-all duration-300"
-                                  style={{ width: `${task.progress}%` }}
-                                />
-                              </div>
-                              <p className="text-[10px] text-foreground/50 text-center mt-1">{task.progress}%</p>
-                            </div>
-                          )}
+
+                    <div className="mt-3 line-clamp-2 min-h-[2.75rem] text-sm leading-6 text-white/82">
+                      {item.prompt || '无提示词'}
+                    </div>
+
+                    <div className="mt-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium text-white/62">
+                          {getModelLabel(item)}
                         </div>
-                        {/* 类型标签 */}
-                        <div className="absolute top-2 left-2 px-2 py-1 bg-sky-500/40 backdrop-blur-sm rounded-md flex items-center gap-1">
-                          {isTaskVideoType(task.type) ? (
-                            <Play className="w-3 h-3 text-foreground" />
-                          ) : (
-                            <ImageIcon className="w-3 h-3 text-foreground" />
-                          )}
-                          <span className="text-[10px] text-foreground">
-                            {task.status === 'processing' ? '生成中' : '排队中'}
-                          </span>
+                        <div className="mt-1 text-[11px] text-white/35">
+                          {new Date(item.createdAt).toLocaleString('zh-CN')}
                         </div>
-                        <div className="absolute top-2 right-2">
-                          <span className="px-2 py-1 bg-background/60 backdrop-blur-sm text-foreground text-[10px] rounded-md flex items-center gap-1">
-                            <badge.icon className="w-3 h-3" />
-                            {badge.label}
-                          </span>
-                        </div>
-                        <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-background/80 via-background/30 to-transparent">
-                          <p className="text-xs text-foreground/80 truncate">{task.prompt || '无提示词'}</p>
-                          <p className="text-[10px] text-foreground/40 mt-1">{formatDate(task.createdAt)}</p>
-                        </div>
+                        {getUpstreamStatusLabel(item) ? (
+                          <div className="mt-1 truncate text-[10px] text-white/28">
+                            上游：{getUpstreamStatusLabel(item)}
+                          </div>
+                        ) : null}
                       </div>
-                    );
-                  })}
-                  
-                  {/* 已完成的作品 - 使用 memo 优化的卡片组件 */}
-                  {filteredGenerations.map((gen) => (
-                    <GenerationCard
-                      key={gen.id}
-                      gen={gen}
-                      badge={resolveGenerationBadge(gen)}
-                      isSelected={selectedIds.has(gen.id)}
-                      selectMode={selectMode}
-                      onSelect={toggleSelect}
-                      onView={setSelected}
-                    />
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-          
-          {/* 加载更多按钮 */}
-          {hasMore && (
-            <div className="shrink-0 p-4 border-t border-border/70 flex items-center justify-center">
-              <button
-                onClick={() => {
-                  const nextPage = page + 1;
-                  setPage(nextPage);
-                  loadHistory(nextPage, true, false, historyMediaKind);
-                }}
-                disabled={loadingMore}
-                className="px-4 py-2 rounded-lg bg-card/60 border border-border/70 text-foreground/70 text-sm hover:text-foreground hover:border-border transition disabled:opacity-50"
-              >
-                {loadingMore ? (
-                  <span className="flex items-center gap-2">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    加载中...
-                  </span>
-                ) : (
-                  '加载更多'
-                )}
-              </button>
+
+                      {item.resultUrl && item.status === 'completed' ? (
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/38 transition group-hover:text-white/78">
+                          <ExternalLink className="h-4 w-4" />
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+
+                if (item.resultUrl && item.status === 'completed') {
+                  return (
+                    <a key={item.id} href={item.resultUrl} target="_blank" rel="noreferrer">
+                      {card}
+                    </a>
+                  );
+                }
+
+                return <div key={item.id}>{card}</div>;
+              })}
             </div>
           )}
-        </div>
-      </div>
 
-      {/* Lightbox */}
-      {selected && (
-        <FullscreenViewer
-          generation={selected}
-          badge={resolveGenerationBadge(selected)}
-          isVideo={isVideoType(selected)}
-          unwatermarkUrl={unwatermarkUrl}
-          unwatermarking={unwatermarking}
-          onClose={() => { setSelected(null); setUnwatermarkUrl(null); }}
-          onDownload={(url, id, type) => downloadFile(url, id, type)}
-          onUnwatermark={(permalink) => handleUnwatermark(permalink)}
-        />
-      )}
-
-      {/* 删除确认弹窗 */}
-      {showDeleteConfirm && (
-        <div
-          className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setShowDeleteConfirm(null)}
-        >
-          <div
-            className="bg-card/95 border border-border/70 rounded-2xl p-6 max-w-md w-full"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${showDeleteConfirm === 'all-characters' ? 'bg-emerald-500/20' : showDeleteConfirm === 'all-errors' ? 'bg-amber-500/20' : 'bg-red-500/20'}`}>
-                {showDeleteConfirm === 'all-characters' ? (
-                  <User className="w-5 h-5 text-emerald-300" />
-                ) : showDeleteConfirm === 'all-errors' ? (
-                  <X className="w-5 h-5 text-amber-300" />
-                ) : (
-                  <Trash2 className="w-5 h-5 text-red-300" />
-                )}
-              </div>
-              <div>
-                <h3 className="text-lg font-medium text-foreground">确认删除</h3>
-                <p className="text-sm text-foreground/40">此操作无法撤销</p>
-              </div>
-            </div>
-
-            <p className="text-foreground/60 mb-6">
-              {showDeleteConfirm === 'all-media' && '确定要清空所有已完成的媒体作品吗？进行中的任务不会被删除。'}
-              {showDeleteConfirm === 'all-characters' && '确定要清空所有角色卡吗？'}
-              {showDeleteConfirm === 'all-errors' && `确定要清空所有 ${failedGenerations.length} 条失败记录吗？`}
-              {showDeleteConfirm === 'batch' && `确定要删除选中的 ${selectedIds.size} 个作品吗？`}
-              {showDeleteConfirm === 'single' && '确定要删除这个作品吗？'}
-            </p>
-            
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowDeleteConfirm(null)}
-                disabled={deleting}
-                className="flex-1 px-4 py-2.5 bg-card/60 text-foreground border border-border/70 rounded-xl hover:bg-card/70 transition-colors text-sm font-medium disabled:opacity-50"
-              >
-                取消
-              </button>
-              <button
-                onClick={() => {
-                  if (showDeleteConfirm === 'single' && deleteTargetId) {
-                    handleDeleteMedia('single', deleteTargetId);
-                  } else if (showDeleteConfirm === 'batch') {
-                    handleDeleteMedia('batch');
-                  } else if (showDeleteConfirm === 'all-media') {
-                    handleDeleteMedia('all');
-                  } else if (showDeleteConfirm === 'all-characters') {
-                    handleDeleteCharacters();
-                  } else if (showDeleteConfirm === 'all-errors') {
-                    handleDeleteFailed();
-                  }
-                }}
-                disabled={deleting}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl transition-colors text-sm font-medium disabled:opacity-50 ${
-                  showDeleteConfirm === 'all-characters' 
-                    ? 'bg-emerald-500 text-foreground hover:bg-emerald-600' 
-                    : 'bg-red-500 text-foreground hover:bg-red-600'
-                }`}
-              >
-                {deleting ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    删除中...
-                  </>
-                ) : (
-                  <>
-                    {showDeleteConfirm === 'all-characters' ? <User className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
-                    确认删除
-                  </>
-                )}
-              </button>
-            </div>
+          <div className="mt-5">
+            <button
+              type="button"
+              className="rounded-full border border-white/10 bg-white/[0.03] px-5 py-2 text-sm text-white/72 transition hover:bg-white/[0.06] hover:text-white"
+            >
+              加载更多
+            </button>
           </div>
         </div>
-      )}
-    </>
-  );
-}
-
-// 角色卡历史记录专属卡片组件
-function CharacterCardHistoryItem({ card }: { card: CharacterCard }) {
-  return (
-    <div className="group relative bg-gradient-to-br from-emerald-500/5 to-sky-500/5 rounded-xl overflow-hidden border border-emerald-500/20 hover:border-emerald-500/40 transition-all">
-      {/* 头像区域 - 正方形 */}
-      <div className="aspect-square bg-gradient-to-br from-emerald-500/10 to-sky-500/10 flex items-center justify-center">
-        {card.avatarUrl ? (
-          <img
-            src={card.avatarUrl}
-            alt={card.characterName}
-            className="w-full h-full object-cover"
-            loading="lazy"
-            decoding="async"
-          />
-        ) : (
-          <User className="w-16 h-16 text-emerald-300/30" />
-        )}
-      </div>
-
-      {/* 角色卡标识 */}
-      <div className="absolute top-2 right-2">
-        <span className="px-2 py-1 bg-gradient-to-r from-emerald-500/80 to-sky-500/80 backdrop-blur-sm text-foreground text-[10px] rounded-md flex items-center gap-1">
-          <User className="w-3 h-3" />
-          角色卡
-        </span>
-      </div>
-
-      {/* 信息区域 */}
-      <div className="p-3 bg-gradient-to-t from-background/60 to-transparent absolute bottom-0 left-0 right-0">
-        <h3 className="text-sm font-medium text-foreground truncate">
-          {card.characterName || '未命名角色'}
-        </h3>
-        <p className="text-[10px] text-foreground/50 mt-1">{formatDate(card.createdAt)}</p>
-      </div>
-
-      {/* Hover 效果 */}
-      <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/20 to-sky-500/20 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center">
-        <div className="w-12 h-12 bg-card/70 backdrop-blur-sm rounded-full flex items-center justify-center">
-          <User className="w-5 h-5 text-foreground" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ========================================
-// Fullscreen Viewer
-// ========================================
-function FullscreenViewer({
-  generation,
-  badge,
-  isVideo,
-  unwatermarkUrl,
-  unwatermarking,
-  onClose,
-  onDownload,
-  onUnwatermark,
-}: {
-  generation: Generation;
-  badge: Badge;
-  isVideo: boolean;
-  unwatermarkUrl: string | null;
-  unwatermarking: boolean;
-  onClose: () => void;
-  onDownload: (url: string, id: string, type: string) => void;
-  onUnwatermark: (permalink: string) => void;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showPanel, setShowPanel] = useState(true);
-  const hideTimerRef = useRef<ReturnType<typeof setTimeout>>();
-
-  const toggleFullscreen = useCallback(async () => {
-    if (!containerRef.current) return;
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    } else {
-      await containerRef.current.requestFullscreen();
-    }
-  }, []);
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-      setShowPanel(true);
-    };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, []);
-
-  // 全屏后自动隐藏面板，鼠标移动时显示
-  useEffect(() => {
-    if (!isFullscreen) return;
-    const onMouseMove = () => {
-      setShowPanel(true);
-      clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = setTimeout(() => setShowPanel(false), 2500);
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    onMouseMove();
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      clearTimeout(hideTimerRef.current);
-    };
-  }, [isFullscreen]);
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !document.fullscreenElement) {
-        onClose();
-      }
-      if ((e.key === 'f' || e.key === 'F') && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        toggleFullscreen();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose, toggleFullscreen]);
-
-  const gen = generation;
-
-  return (
-    <div
-      ref={containerRef}
-      className={`fixed inset-0 z-[60] flex flex-col ${isFullscreen ? 'bg-black' : 'bg-background/95 backdrop-blur-xl'}`}
-      onClick={onClose}
-    >
-      {/* 顶部工具栏 */}
-      <div className={`shrink-0 flex items-center justify-end gap-2 p-3 transition-opacity duration-300 ${
-        isFullscreen && !showPanel ? 'opacity-0 pointer-events-none' : 'opacity-100'
-      }`}>
-        <button
-          onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
-          className="p-2 text-foreground/50 hover:text-foreground rounded-lg hover:bg-card/70 transition-colors"
-          title={isFullscreen ? '退出全屏 (Ctrl+F)' : '全屏查看 (Ctrl+F)'}
-        >
-          <Maximize2 className="w-4 h-4" />
-        </button>
-        <button
-          onClick={onClose}
-          className="p-2 text-foreground/50 hover:text-foreground rounded-lg hover:bg-card/70 transition-colors"
-          title="关闭 (Esc)"
-        >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Media */}
-      <div
-        className={`flex-1 min-h-0 flex items-center justify-center transition-all duration-300 ${
-          isFullscreen ? 'p-0' : 'p-4 md:p-6'
-        }`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {isVideo ? (
-          <video
-            src={gen.resultUrl}
-            className={`max-w-full max-h-full w-auto h-auto ${isFullscreen ? '' : 'rounded-xl border border-border/70'} object-contain`}
-            controls
-            autoPlay
-            loop
-            playsInline
-            preload="metadata"
-          />
-        ) : (
-          <img
-            src={gen.resultUrl}
-            alt={gen.prompt}
-            className={`max-w-full max-h-full w-auto h-auto ${isFullscreen ? '' : 'rounded-xl border border-border/70'} object-contain`}
-            decoding="async"
-          />
-        )}
-      </div>
-
-      {/* 信息面板 */}
-      <div
-        className={`shrink-0 w-full transition-all duration-300 ${
-          isFullscreen
-            ? showPanel
-              ? 'translate-y-0 opacity-100'
-              : 'translate-y-full opacity-0'
-            : 'translate-y-0 opacity-100'
-        } ${isFullscreen ? 'bg-black/80 backdrop-blur-sm' : 'bg-background/80 backdrop-blur-sm border-t border-border/30'}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="max-w-3xl mx-auto p-3 md:px-8 md:py-3">
-          <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
-            <div className="flex-1 min-w-0">
-              <CollapsibleText text={gen.prompt || '无提示词'} collapsedLines={2} />
-              <div className="flex flex-wrap items-center gap-2 mt-2">
-                <span className="text-foreground/40 text-xs">{formatDate(gen.createdAt)}</span>
-                <span className="text-foreground/30">·</span>
-                <span className="text-foreground/40 text-xs">{gen.cost} 积分</span>
-                <span className="text-foreground/30">·</span>
-                <span className="px-2 py-0.5 bg-card/70 text-foreground/60 text-xs rounded">
-                  {badge.label}
-                </span>
-                {gen.resultUrl && (
-                  <button
-                    onClick={() => { navigator.clipboard.writeText(gen.resultUrl); toast({ title: '已复制 URL' }); }}
-                    className="p-1 text-foreground/40 hover:text-foreground/80 rounded transition-colors"
-                    title="复制 URL"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2 shrink-0 w-full md:w-auto">
-              {gen.type === 'sora-video' && gen.params?.permalink && (
-                <a href={gen.params.permalink} target="_blank" rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-2 px-4 py-2 bg-card/70 text-foreground border border-border/70 rounded-xl hover:bg-card/80 transition-colors text-xs font-medium">
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  分享页
-                </a>
-              )}
-              {gen.type === 'sora-video' && (gen.params?.permalink || gen.params?.videoId) && (
-                <button
-                  onClick={() => {
-                    const permalink = gen.params?.permalink ||
-                      (gen.params?.videoId ? `https://sora.com/share/${gen.params.videoId}` : '');
-                    if (permalink) onUnwatermark(permalink);
-                  }}
-                  disabled={unwatermarking}
-                  className="flex items-center justify-center gap-2 px-4 py-2 bg-sky-500/20 text-sky-300 border border-sky-500/30 rounded-xl hover:bg-sky-500/30 transition-colors text-xs font-medium disabled:opacity-50"
-                >
-                  {unwatermarking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Droplets className="w-3.5 h-3.5" />}
-                  {unwatermarking ? '处理中...' : '去水印'}
-                </button>
-              )}
-              {unwatermarkUrl && (
-                <button
-                  onClick={() => onDownload(unwatermarkUrl, gen.id, gen.type)}
-                  className="flex items-center justify-center gap-2 px-4 py-2 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-xl hover:bg-emerald-500/30 transition-colors text-xs font-medium"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  无水印
-                </button>
-              )}
-              <button
-                onClick={() => onDownload(gen.resultUrl, gen.id, gen.type)}
-                className="flex items-center justify-center gap-2 px-5 py-2 bg-foreground text-background rounded-xl hover:opacity-90 transition-colors text-sm font-medium"
-              >
-                <Download className="w-3.5 h-3.5" />
-                下载
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      </section>
     </div>
   );
 }

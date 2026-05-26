@@ -16,14 +16,14 @@ export interface ExtendedSiteConfig extends SiteConfig {
 }
 
 const defaultSiteConfig: ExtendedSiteConfig = {
-  siteName: 'SANHUB',
-  siteTagline: 'Let Imagination Come Alive',
-  siteDescription: '「SANHUB」是专为 AI 创作打造的一站式平台',
-  siteSubDescription: '我们融合了 Sora 视频生成、Gemini 图像创作与多模型 AI 对话。在这里，技术壁垒已然消融，你唯一的使命就是释放纯粹的想象。',
-  contactEmail: 'support@sanhub.com',
-  copyright: 'Copyright © 2025 SANHUB',
-  poweredBy: 'Powered by OpenAI Sora & Google Gemini',
-  defaultBalance: 100,
+  siteName: '幻途',
+  siteTagline: '幻途 AI 内容创作平台',
+  siteDescription: '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
+  siteSubDescription: '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+  contactEmail: 'support@aigcone.cn',
+  copyright: '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
+  poweredBy: '幻途 · Huantu AI',
+  defaultBalance: 50,
   squareEnabled: true,
   gachaEnabled: true,
   characterCardEnabled: true,
@@ -68,7 +68,7 @@ export function SiteConfigProvider({ children, initialConfig }: SiteConfigProvid
       if (data.success && data.data) {
         setConfig({
           ...data.data,
-          defaultBalance: data.data.defaultBalance ?? 100,
+          defaultBalance: data.data.defaultBalance ?? 50,
           squareEnabled: data.data.squareEnabled ?? true,
           gachaEnabled: data.data.gachaEnabled ?? true,
           characterCardEnabled: data.data.characterCardEnabled ?? true,

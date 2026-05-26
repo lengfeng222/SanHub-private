@@ -1,8 +1,45 @@
 /* eslint-disable no-console */
 // 数据库适配器接口
 export interface DatabaseAdapter {
-  execute(sql: string, params?: unknown[]): Promise<[unknown[], unknown]>;
+  execute(sql: string, params?: unknown[]): Promise<[unknown, unknown]>;
   close(): Promise<void>;
+}
+
+function runtimeRequire<T = any>(moduleName: string): T {
+  return (eval('require') as NodeRequire)(moduleName) as T;
+}
+
+function resolveSqlitePath(): string {
+  const explicitPath = (process.env.SQLITE_PATH || '').trim();
+  if (explicitPath) return explicitPath;
+
+  const fs = runtimeRequire<any>('fs');
+  const path = runtimeRequire<any>('path');
+  const cwd = process.cwd();
+  const candidates: string[] = [];
+
+  const dataDir = (process.env.DATA_DIR || '').trim();
+  if (dataDir) {
+    const resolvedDataDir = path.isAbsolute(dataDir) ? dataDir : path.resolve(cwd, dataDir);
+    candidates.push(
+      dataDir.toLowerCase().endsWith('.db')
+        ? resolvedDataDir
+        : path.join(resolvedDataDir, 'sanhub.db')
+    );
+  }
+
+  let current = cwd;
+  for (let depth = 0; depth < 6; depth += 1) {
+    candidates.push(path.resolve(current, 'data', 'sanhub.db'));
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  candidates.push(path.resolve(cwd, 'sanhub.db'));
+
+  const existing = candidates.find((candidate) => fs.existsSync(candidate));
+  return existing || candidates[0] || path.resolve(cwd, 'data', 'sanhub.db');
 }
 
 function parseIntegerEnv(value: string | undefined, fallback: number): number {
@@ -33,7 +70,7 @@ function readTlsValue(value: string | undefined): string | undefined {
     return trimmed.replace(/\\n/g, '\n');
   }
 
-  const fs = require('fs');
+  const fs = runtimeRequire<any>('fs');
   if (fs.existsSync(trimmed)) {
     return fs.readFileSync(trimmed, 'utf8');
   }
@@ -100,7 +137,7 @@ export class MySQLAdapter implements DatabaseAdapter {
   private pool: any;
 
   constructor() {
-    const mysql = require('mysql2/promise');
+    const mysql = runtimeRequire<any>('mysql2/promise');
     const mysqlPoolSize = parseIntegerEnv(process.env.MYSQL_POOL_SIZE, 20);
     const mysqlDatabase =
       process.env.MYSQL_DATABASE ||
@@ -146,7 +183,7 @@ export class MySQLAdapter implements DatabaseAdapter {
     );
   }
 
-  async execute(sql: string, params?: unknown[]): Promise<[unknown[], unknown]> {
+  async execute(sql: string, params?: unknown[]): Promise<[unknown, unknown]> {
     try {
       return await this.pool.execute(sql, params);
     } catch (error) {
@@ -175,20 +212,21 @@ export class SQLiteAdapter implements DatabaseAdapter {
   private dbPath: string;
 
   constructor() {
-    this.dbPath = process.env.SQLITE_PATH || './data/sanhub.db';
+    this.dbPath = resolveSqlitePath();
     
     // 确保目录存在
-    const fs = require('fs');
-    const path = require('path');
+    const fs = runtimeRequire<any>('fs');
+    const path = runtimeRequire<any>('path');
     const dbDir = path.dirname(this.dbPath);
     if (!fs.existsSync(dbDir)) {
       fs.mkdirSync(dbDir, { recursive: true });
     }
 
     // 初始化数据库连接
-    const Database = require('better-sqlite3');
+    const Database = runtimeRequire<any>('better-sqlite3');
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');
+    console.log(`[SQLite] Database path: ${this.dbPath}`);
   }
 
   // 转换参数为 SQLite 支持的类型
@@ -203,7 +241,29 @@ export class SQLiteAdapter implements DatabaseAdapter {
     });
   }
 
-  async execute(sql: string, params?: unknown[]): Promise<[unknown[], unknown]> {
+  private shouldSilenceMigrationError(sql: string, error: unknown): boolean {
+    const normalizedSql = sql.trim().toUpperCase();
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'object' && error && 'message' in error
+          ? String((error as { message?: unknown }).message || '')
+          : String(error || '');
+
+    const isMigrationStatement =
+      normalizedSql.startsWith('ALTER TABLE') ||
+      normalizedSql.startsWith('CREATE TABLE') ||
+      normalizedSql.startsWith('CREATE INDEX');
+
+    if (!isMigrationStatement) return false;
+
+    return (
+      message.includes('duplicate column name') ||
+      message.includes('already exists')
+    );
+  }
+
+  async execute(sql: string, params?: unknown[]): Promise<[unknown, unknown]> {
     // 转换 MySQL 语法到 SQLite
     sql = this.convertSQLToSQLite(sql);
 
@@ -224,12 +284,17 @@ export class SQLiteAdapter implements DatabaseAdapter {
       } else {
         const stmt = this.db.prepare(sql);
         const result = safeParams.length ? stmt.run(...safeParams) : stmt.run();
-        return [[], { affectedRows: result.changes, insertId: result.lastInsertRowid }];
+        return [
+          { affectedRows: result.changes, insertId: result.lastInsertRowid },
+          {},
+        ];
       }
     } catch (error) {
-      console.error('[SQLite] SQL execution error:', error);
-      console.error('[SQLite] SQL:', sql);
-      console.error('[SQLite] Params:', safeParams);
+      if (!this.shouldSilenceMigrationError(sql, error)) {
+        console.error('[SQLite] SQL execution error:', error);
+        console.error('[SQLite] SQL:', sql);
+        console.error('[SQLite] Params:', safeParams);
+      }
       throw error;
     }
   }

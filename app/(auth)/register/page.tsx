@@ -4,31 +4,50 @@ import { useState, useCallback, useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Loader2, ArrowRight, Gift, Sparkles } from 'lucide-react';
+import { Loader2, ArrowRight, Gift } from 'lucide-react';
+import { BrandMark } from '@/components/brand/brand-mark';
 import { Captcha } from '@/components/ui/captcha';
 import { AnimatedBackground } from '@/components/ui/animated-background';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
+
+const AUTH_BRAND_NAME = '幻途';
+const inputClassName =
+  'h-12 w-full rounded-xl border border-white/[0.07] bg-[#171b21]/90 px-4 text-sm text-foreground placeholder:text-foreground/30 outline-none transition-colors focus:border-white/15 focus:ring-2 focus:ring-white/10';
+const labelClassName = 'text-xs text-foreground/42';
+const captchaInputClassName =
+  'h-12 min-w-0 flex-1 rounded-xl border border-white/[0.07] bg-[#171b21]/90 px-4 text-sm uppercase tracking-widest text-foreground placeholder:normal-case placeholder:tracking-normal placeholder:text-foreground/30 outline-none transition-colors focus:border-white/15 focus:ring-2 focus:ring-white/10';
+const captchaImageClassName = 'h-12 w-[120px] cursor-pointer overflow-hidden rounded-xl border border-white/[0.07] bg-[#101419]';
+const captchaButtonClassName =
+  'flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.07] bg-[#11151a]/80 transition-colors hover:bg-[#171b21] disabled:opacity-50';
 
 export default function RegisterPage() {
   const router = useRouter();
   const { data: session, status } = useSession();
   const siteConfig = useSiteConfig();
+  const [mounted, setMounted] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [emailCode, setEmailCode] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [captchaId, setCaptchaId] = useState('');
   const [captchaCode, setCaptchaCode] = useState('');
+  const [captchaKey, setCaptchaKey] = useState(0);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [sendingEmailCode, setSendingEmailCode] = useState(false);
+  const [emailCodeMessage, setEmailCodeMessage] = useState('');
+  const [emailCodeCooldown, setEmailCodeCooldown] = useState(0);
 
-  // defaultBalance now comes from siteConfig
-  const defaultBalance = siteConfig.defaultBalance;
+  const defaultBalance = 50;
 
-  // 已登录用户自动跳转
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   useEffect(() => {
     if (status === 'authenticated' && session) {
-      router.replace('/create');
+      router.replace('/supervideo');
     }
   }, [status, session, router]);
 
@@ -37,8 +56,13 @@ export default function RegisterPage() {
     setCaptchaCode(code);
   }, []);
 
-  // 如果正在检查登录状态，显示加载中
-  if (status === 'loading') {
+  useEffect(() => {
+    if (emailCodeCooldown <= 0) return;
+    const timer = window.setTimeout(() => setEmailCodeCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [emailCodeCooldown]);
+
+  if (!mounted) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-foreground/50">加载中...</div>
@@ -46,7 +70,6 @@ export default function RegisterPage() {
     );
   }
 
-  // 已登录则不渲染注册表单（等待跳转）
   if (status === 'authenticated') {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -54,6 +77,33 @@ export default function RegisterPage() {
       </div>
     );
   }
+
+  const handleSendEmailCode = async () => {
+    setError('');
+    setEmailCodeMessage('');
+
+    if (!email) {
+      setError('请先输入邮箱');
+      return;
+    }
+
+    setSendingEmailCode(true);
+    try {
+      const res = await fetch('/api/auth/email-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '发送失败');
+      setEmailCodeMessage(data.message || '验证码已发送，请查看邮箱');
+      setEmailCodeCooldown(60);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '验证码发送失败');
+    } finally {
+      setSendingEmailCode(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,33 +119,37 @@ export default function RegisterPage() {
       return;
     }
 
-    // 验证码检查
     if (!captchaCode || captchaCode.length !== 4) {
       setError('请输入4位验证码');
+      return;
+    }
+
+    if (!emailCode || emailCode.trim().length < 4) {
+      setError('请输入邮箱验证码');
       return;
     }
 
     setLoading(true);
 
     try {
-      // 先验证验证码
       const captchaRes = await fetch('/api/captcha/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: captchaId, code: captchaCode }),
       });
-      
+
       const captchaData = await captchaRes.json();
       if (!captchaData.success) {
         setError('验证码错误');
-        handleCaptchaChange('', '');
+        setCaptchaKey((key) => key + 1);
+        setLoading(false);
         return;
       }
 
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify({ name, email, password, emailCode }),
       });
 
       const data = await res.json();
@@ -104,91 +158,121 @@ export default function RegisterPage() {
         throw new Error(data.error || '注册失败');
       }
 
-      router.push('/login?registered=true');
+      router.push('/login?registered=true&callbackUrl=%2Fsupervideo');
     } catch (err) {
       setError(err instanceof Error ? err.message : '注册失败，请重试');
+      setCaptchaKey((key) => key + 1);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex flex-col relative overflow-hidden text-foreground">
-      {/* 动态背景 */}
+    <div className="relative flex min-h-screen flex-col overflow-hidden text-foreground">
       <AnimatedBackground variant="auth" />
-      
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center justify-center px-6 py-12 relative z-10">
-        <div className="w-full max-w-sm space-y-6">
-          {/* Logo */}
-          <div className="text-center space-y-4 animate-rise">
-            <Link href="/" className="inline-block group">
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <div className="w-10 h-10 bg-gradient-to-br from-sky-500/25 to-emerald-500/25 border border-border/70 rounded-xl flex items-center justify-center group-hover:scale-110 transition-transform">
-                  <Sparkles className="w-5 h-5 text-foreground/80" />
-                </div>
-              </div>
-              <h1 className="text-3xl font-light tracking-wider text-foreground">{siteConfig.siteName}</h1>
+
+      <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-10">
+        <div className="w-full max-w-sm animate-rise space-y-6">
+          <div className="text-center">
+            <Link href="/" className="inline-flex flex-col items-center gap-4 group">
+              <BrandMark
+                size={40}
+                rounded="rounded-xl"
+                className="border-white/15 shadow-[0_0_35px_rgba(56,189,248,0.22)] transition-transform group-hover:scale-105"
+              />
+              <h1 className="text-[2rem] font-light leading-none tracking-[-0.04em] text-foreground/90">{AUTH_BRAND_NAME}</h1>
             </Link>
-            <p className="text-foreground/40 text-sm">创建账号，开启创作之旅</p>
+            <p className="mt-5 text-sm text-foreground/34">创建账号，开启创作之旅</p>
           </div>
 
-          {/* Bonus hint */}
-          <div className="flex items-center justify-center gap-2 py-2.5 px-5 bg-gradient-to-r from-sky-500/10 to-emerald-500/10 border border-border/70 rounded-full mx-auto w-fit backdrop-blur-sm">
-            <Gift className="w-4 h-4 text-sky-300" />
-            <span className="text-sm text-foreground/70">新用户赠送 <span className="text-foreground font-medium">{defaultBalance}</span> 积分</span>
+          <div className="mx-auto flex w-fit items-center gap-2 rounded-full border border-teal-300/10 bg-teal-400/10 px-5 py-2.5 text-sm text-foreground/72 backdrop-blur-sm">
+            <Gift className="h-4 w-4 text-sky-300" />
+            <span>新用户赠送 <span className="font-medium text-foreground">{defaultBalance}</span> 积分</span>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-xs text-foreground/50 uppercase tracking-wider">昵称</label>
+            <div className="space-y-2">
+              <label className={labelClassName}>昵称</label>
               <input
                 type="text"
                 placeholder="您的昵称"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(event) => setName(event.target.value)}
                 required
-                className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-lg text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors text-sm"
+                className={inputClassName}
               />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs text-foreground/50 uppercase tracking-wider">邮箱</label>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>邮箱</label>
               <input
                 type="email"
                 placeholder="your@email.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(event) => setEmail(event.target.value)}
                 required
-                className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-lg text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors text-sm"
+                className={inputClassName}
               />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs text-foreground/50 uppercase tracking-wider">密码</label>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>邮箱验证码</label>
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  placeholder="输入邮箱验证码"
+                  value={emailCode}
+                  onChange={(event) => setEmailCode(event.target.value)}
+                  required
+                  className="h-12 min-w-0 flex-1 rounded-xl border border-white/[0.07] bg-[#171b21]/90 px-4 text-sm text-foreground placeholder:text-foreground/30 outline-none transition-colors focus:border-white/15 focus:ring-2 focus:ring-white/10"
+                />
+                <button
+                  type="button"
+                  onClick={handleSendEmailCode}
+                  disabled={sendingEmailCode || emailCodeCooldown > 0}
+                  className="h-12 shrink-0 rounded-xl border border-white/[0.07] bg-[#11151a]/80 px-4 text-xs text-foreground/55 transition-colors hover:bg-[#171b21] hover:text-foreground/80 disabled:opacity-50"
+                >
+                  {sendingEmailCode ? '发送中...' : emailCodeCooldown > 0 ? `${emailCodeCooldown}s` : '发送验证码'}
+                </button>
+              </div>
+              {emailCodeMessage && <p className="text-xs text-foreground/34">{emailCodeMessage}</p>}
+            </div>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>密码</label>
               <input
                 type="password"
                 placeholder="至少 6 个字符"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(event) => setPassword(event.target.value)}
                 required
-                className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-lg text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors text-sm"
+                className={inputClassName}
               />
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs text-foreground/50 uppercase tracking-wider">确认密码</label>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>确认密码</label>
               <input
                 type="password"
                 placeholder="再次输入密码"
                 value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                onChange={(event) => setConfirmPassword(event.target.value)}
                 required
-                className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-lg text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors text-sm"
+                className={inputClassName}
               />
             </div>
 
-            <Captcha onCaptchaChange={handleCaptchaChange} />
+            <Captcha
+              key={captchaKey}
+              onCaptchaChange={handleCaptchaChange}
+              labelClassName={labelClassName}
+              inputClassName={captchaInputClassName}
+              imageClassName={captchaImageClassName}
+              buttonClassName={captchaButtonClassName}
+            />
 
             {error && (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+              <div className="rounded-xl border border-red-500/25 bg-red-500/10 p-3">
                 <p className="text-sm text-red-300">{error}</p>
               </div>
             )}
@@ -196,34 +280,33 @@ export default function RegisterPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full flex items-center justify-center gap-2 px-6 py-3.5 bg-foreground text-background rounded-full font-medium hover:opacity-90 transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+              className="flex w-full items-center justify-center gap-3 rounded-full bg-foreground px-6 py-3.5 font-medium text-background shadow-[0_18px_55px_rgba(255,255,255,0.08)] transition-all hover:scale-[1.01] hover:bg-foreground/92 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
             >
               {loading ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                   注册中...
                 </>
               ) : (
                 <>
                   创建账号
-                  <ArrowRight className="w-4 h-4" />
+                  <ArrowRight className="h-4 w-4" />
                 </>
               )}
             </button>
           </form>
 
           <div className="text-center text-sm">
-            <span className="text-foreground/40">已有账号？</span>{' '}
-            <Link href="/login" className="text-foreground/80 hover:text-foreground transition-colors">
+            <span className="text-foreground/36">已有账号？</span>{' '}
+            <Link href="/login" className="text-foreground/78 transition-colors hover:text-foreground">
               立即登录
             </Link>
           </div>
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="relative z-10 py-6 text-center">
-        <p className="text-xs text-foreground/30">{siteConfig.copyright}</p>
+      <footer className="relative z-10 pb-8 text-center">
+        <p className="text-xs tracking-wide text-foreground/24">{siteConfig.copyright}</p>
       </footer>
     </div>
   );

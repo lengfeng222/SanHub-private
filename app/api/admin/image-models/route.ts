@@ -64,6 +64,10 @@ export async function POST(request: NextRequest) {
       highlight,
       enabled,
       costPerGeneration,
+      billingMode,
+      billingPrice,
+      billingUnit,
+      imageUrl,
       sortOrder,
     } = body;
 
@@ -96,6 +100,10 @@ export async function POST(request: NextRequest) {
       highlight: highlight || false,
       enabled: enabled !== false,
       costPerGeneration: costPerGeneration || 10,
+      billingMode: billingMode || 'per_call',
+      billingPrice: billingPrice ?? costPerGeneration ?? 10,
+      billingUnit: billingUnit || 1,
+      imageUrl: imageUrl || undefined,
       sortOrder: sortOrder || 0,
     });
 

@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const { id, svg } = createCaptcha();
+    const { id, svg } = await createCaptcha();
     
     return NextResponse.json({
       success: true,

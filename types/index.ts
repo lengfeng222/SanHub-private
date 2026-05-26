@@ -7,9 +7,10 @@
 // moderator: 小管理员，只能管理用户（积分、密码、禁用），不能修改超级管理员
 // user: 普通用户
 export type UserRole = 'user' | 'admin' | 'moderator';
+export type BillingMode = 'per_call' | 'per_second' | 'per_1k_tokens';
 
 // 生成类型
-export type GenerationType = 'sora-video' | 'sora-image' | 'gemini-image' | 'zimage-image' | 'gitee-image' | 'chat' | 'character-card';
+export type GenerationType = 'sora-video' | 'sora-image' | 'gemini-image' | 'zimage-image' | 'gitee-image' | 'music' | 'voice' | 'chat' | 'character-card';
 
 // 聊天模型配置
 export interface ChatModel {
@@ -22,6 +23,10 @@ export interface ChatModel {
   maxTokens: number;
   enabled: boolean;
   costPerMessage: number;
+  billingMode?: BillingMode;
+  billingPrice?: number;
+  billingUnit?: number;
+  imageUrl?: string;
   createdAt: number;
 }
 
@@ -111,6 +116,18 @@ export interface GenerationParams {
   processedPrompt?: string;
   progress?: number; // 生成进度 0-100
   clientRequestId?: string;
+  voice?: string;
+  format?: string;
+  upstreamTaskId?: string;
+  upstreamStatus?: string;
+  upstreamState?: string;
+  upstreamStatusGroup?: string;
+  upstreamProgress?: number;
+  upstreamCost?: number;
+  upstreamResultType?: string;
+  upstreamResultUrl?: string;
+  upstreamFinal?: boolean;
+  upstreamUpdatedAt?: number;
 }
 
 // SORA 后台配置
@@ -176,7 +193,8 @@ export type ChannelType =
   | 'gemini'
   | 'sora'
   | 'flow2api'
-  | 'grok2api';
+  | 'grok2api'
+  | 'lingke-media';
 
 // Video channel types (for /admin/video-channels)
 export type VideoChannelType =
@@ -184,7 +202,8 @@ export type VideoChannelType =
   | 'sora'
   | 'openai-compatible'
   | 'flow2api'
-  | 'grok2api';
+  | 'grok2api'
+  | 'lingke-media';
 
 // 模型功能特性
 export interface ImageModelFeatures {
@@ -229,6 +248,10 @@ export interface ImageModel {
   highlight?: boolean;              // 是否高亮显示
   enabled: boolean;
   costPerGeneration: number;
+  billingMode?: BillingMode;
+  billingPrice?: number;
+  billingUnit?: number;
+  imageUrl?: string;         // 模型封面/图标 URL
   sortOrder: number;         // 排序顺序
   createdAt: number;
   updatedAt: number;
@@ -261,6 +284,10 @@ export interface SafeImageModel {
   highlight?: boolean;
   enabled: boolean;
   costPerGeneration: number;
+  billingMode?: BillingMode;
+  billingPrice?: number;
+  billingUnit?: number;
+  imageUrl?: string;
 }
 
 // ========================================
@@ -295,7 +322,7 @@ export interface VideoDuration {
 }
 
 export type VideoAspectRatio = '16:9' | '9:16' | '1:1' | '2:3' | '3:2';
-export type VideoResolution = 'SD' | 'HD';
+export type VideoResolution = 'SD' | 'HD' | '720P' | '1080P' | '2K' | '4K' | (string & {});
 export type VideoPreset = 'fun' | 'normal' | 'spicy';
 
 export interface VideoConfigObject {
@@ -303,6 +330,12 @@ export interface VideoConfigObject {
   video_length?: number;
   resolution?: VideoResolution;
   preset?: VideoPreset;
+  generation_mode?: string;
+  off_peak?: boolean;
+  quality_version?: string;
+  model_version?: string;
+  version?: string;
+  extra_params?: Record<string, unknown>;
 }
 
 // 视频模型配置
@@ -322,6 +355,10 @@ export interface VideoModel {
   videoConfigObject?: VideoConfigObject;
   highlight?: boolean;
   enabled: boolean;
+  billingMode?: BillingMode;
+  billingPrice?: number;
+  billingUnit?: number;
+  imageUrl?: string;         // 模型封面/图标 URL
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
@@ -351,6 +388,10 @@ export interface SafeVideoModel {
   videoConfigObject?: VideoConfigObject;
   highlight?: boolean;
   enabled: boolean;
+  billingMode?: BillingMode;
+  billingPrice?: number;
+  billingUnit?: number;
+  imageUrl?: string;
 }
 
 // 网站配置
@@ -419,6 +460,40 @@ export interface GenerateRateLimitConfig {
   videoWindowSeconds: number;
 }
 
+export interface AudioProviderConfig {
+  musicBaseUrl: string;
+  musicApiKey: string;
+  musicModel: string;
+  musicEndpointPath: string;
+  musicCost: number;
+  musicBillingMode?: BillingMode;
+  musicBillingPrice?: number;
+  musicBillingUnit?: number;
+  voiceBaseUrl: string;
+  voiceApiKey: string;
+  voiceModel: string;
+  voiceVoice: string;
+  voiceFormat: string;
+  voiceEndpointPath: string;
+  voiceCost: number;
+  voiceBillingMode?: BillingMode;
+  voiceBillingPrice?: number;
+  voiceBillingUnit?: number;
+}
+
+export interface PaymentProviderConfig {
+  enabled: boolean;
+  provider: 'epay';
+  apiUrl: string;
+  pid: string;
+  key: string;
+  notifyUrl: string;
+  returnUrl: string;
+  pointRate: number;
+  minAmount: number;
+  payTypes: string[];
+}
+
 // 系统配置
 export interface SystemConfig {
   soraApiKey: string;
@@ -461,6 +536,8 @@ export interface SystemConfig {
   promptProcessing: PromptProcessingConfig;
   // Generate API rate limit configuration
   rateLimit: GenerateRateLimitConfig;
+  audioProvider: AudioProviderConfig;
+  paymentProvider: PaymentProviderConfig;
 }
 
 // 定价配置
@@ -493,6 +570,7 @@ export interface SoraGenerateRequest {
   video_config?: VideoConfigObject;
   files?: { mimeType: string; data: string }[];
   referenceImageUrl?: string;
+  publicBaseUrl?: string;
   style_id?: string; // 风格: festive, retro, news, selfie, handheld, anime, comic, golden, vintage
   remix_target_id?: string; // Remix 视频 ID
 }

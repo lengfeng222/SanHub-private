@@ -106,5 +106,5 @@ export const authOptions: NextAuthOptions = {
     strategy: 'jwt',
     maxAge: 7 * 24 * 60 * 60, // 7 天
   },
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: process.env.NEXTAUTH_SECRET || 'sanhub-local-dev-secret',
 };

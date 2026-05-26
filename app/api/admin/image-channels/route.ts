@@ -22,6 +22,7 @@ const IMAGE_CHANNEL_TYPES: ChannelType[] = [
   'sora',
   'flow2api',
   'grok2api',
+  'lingke-media',
 ];
 
 const IMAGE_CHANNEL_TYPE_ALIASES: Record<string, ChannelType> = {
@@ -39,6 +40,10 @@ const IMAGE_CHANNEL_TYPE_ALIASES: Record<string, ChannelType> = {
   sora: 'sora',
   flow2api: 'flow2api',
   grok2api: 'grok2api',
+  'lingke-media': 'lingke-media',
+  lingke_media: 'lingke-media',
+  lingkeai: 'lingke-media',
+  lkmedia: 'lingke-media',
 };
 
 function normalizeImageChannelType(input: unknown): ChannelType | null {

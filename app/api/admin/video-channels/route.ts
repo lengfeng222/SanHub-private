@@ -17,6 +17,7 @@ const VIDEO_CHANNEL_TYPES: VideoChannelType[] = [
   'openai-compatible',
   'flow2api',
   'grok2api',
+  'lingke-media',
 ];
 
 const VIDEO_CHANNEL_TYPE_ALIASES: Record<string, VideoChannelType> = {
@@ -30,6 +31,10 @@ const VIDEO_CHANNEL_TYPE_ALIASES: Record<string, VideoChannelType> = {
   flow2api: 'flow2api',
   flow2apiw: 'flow2api',
   grok2api: 'grok2api',
+  'lingke-media': 'lingke-media',
+  lingke_media: 'lingke-media',
+  lingkeai: 'lingke-media',
+  lkmedia: 'lingke-media',
 };
 
 function normalizeVideoChannelType(input: unknown): VideoChannelType | null {

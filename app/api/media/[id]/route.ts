@@ -41,23 +41,33 @@ export async function GET(
       return new NextResponse('Forbidden', { status: 403 });
     }
     
-    let resultUrl = generation.resultUrl;
+    let resultUrl = generation.resultUrl || '';
+    const upstreamResultUrl =
+      typeof generation.params?.upstreamResultUrl === 'string'
+        ? generation.params.upstreamResultUrl.trim()
+        : '';
     const videoId = typeof generation.params?.videoId === 'string' ? generation.params.videoId : undefined;
     const videoChannelId =
       typeof generation.params?.videoChannelId === 'string' ? generation.params.videoChannelId : undefined;
-    
-    if (!resultUrl) {
-      return new NextResponse('No Content', { status: 204 });
+
+    if (!resultUrl && upstreamResultUrl) {
+      resultUrl = upstreamResultUrl;
     }
 
     if (videoId) {
       try {
         const actualUrl = await getVideoContentUrl(videoId, videoChannelId);
         console.log('[Media API] Sora content URL resolved by videoId:', actualUrl?.substring(0, 80));
-        resultUrl = actualUrl;
+        if (actualUrl) {
+          resultUrl = actualUrl;
+        }
       } catch (error) {
         console.error('[Media API] Failed to resolve videoId content URL:', error);
       }
+    }
+
+    if (!resultUrl) {
+      return new NextResponse('No Content', { status: 204 });
     }
     
     // 检查是否是 Sora /content 端点 URL（需要 API Key 认证）

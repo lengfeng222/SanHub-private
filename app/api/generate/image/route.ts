@@ -18,6 +18,7 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { fetchReferenceImage } from '@/lib/reference-image';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import type { ChannelType, Generation, GenerationType } from '@/types';
+import { calculateBillingCost } from '@/lib/billing';
 
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
@@ -35,6 +36,7 @@ const IMAGE_TYPE_BY_CHANNEL: Record<ChannelType, GenerationType> = {
   sora: 'sora-image',
   flow2api: 'gemini-image',
   grok2api: 'gemini-image',
+  'lingke-media': 'gemini-image',
 };
 
 class RouteResponseError extends Error {
@@ -177,6 +179,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '模型已禁用' }, { status: 400 });
     }
 
+    const actualCost = calculateBillingCost({
+      billingMode: model.billingMode,
+      billingPrice: model.billingPrice,
+      billingUnit: model.billingUnit,
+      legacyCost: model.costPerGeneration,
+    });
+
     const resolvedTarget = resolveImageTarget(
       model.apiModel,
       model.resolutions,
@@ -231,10 +240,10 @@ export async function POST(request: NextRequest) {
 
     const createTask = async (): Promise<Generation> => {
       // 检查余额
-      if (user.balance < model.costPerGeneration) {
+      if (user.balance < actualCost) {
         throwRouteResponse(
           NextResponse.json(
-            { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
+            { error: `余额不足，需要至少 ${actualCost} 积分` },
             { status: 402 }
           )
         );
@@ -314,13 +323,13 @@ export async function POST(request: NextRequest) {
       };
 
       try {
-        await updateUserBalance(user.id, -model.costPerGeneration, 'strict');
+        await updateUserBalance(user.id, -actualCost, 'strict');
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Insufficient balance';
         if (message.includes('Insufficient balance')) {
           throwRouteResponse(
             NextResponse.json(
-              { error: `余额不足，需要至少 ${model.costPerGeneration} 积分` },
+              { error: `余额不足，需要至少 ${actualCost} 积分` },
               { status: 402 }
             )
           );
@@ -348,13 +357,13 @@ export async function POST(request: NextRequest) {
           prompt: prompt || '',
           params: generationParams,
           resultUrl: '',
-          cost: model.costPerGeneration,
+          cost: actualCost,
           status: 'pending',
           balancePrecharged: true,
           balanceRefunded: false,
         });
       } catch (saveErr) {
-        await updateUserBalance(user.id, model.costPerGeneration, 'strict').catch(refundErr => {
+        await updateUserBalance(user.id, actualCost, 'strict').catch(refundErr => {
           console.error('[API] Precharge rollback failed:', refundErr);
         });
         throw saveErr;
@@ -376,7 +385,7 @@ export async function POST(request: NextRequest) {
           ...generateRequest,
           idempotencyKey: `sanhub-image-${clientRequestId || generation.id}`,
         },
-        model.costPerGeneration,
+        actualCost,
         generationParams,
         origin
       ).catch((err) => {

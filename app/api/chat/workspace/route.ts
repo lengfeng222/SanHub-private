@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getChatModel, getUserById, updateUserBalance } from '@/lib/db';
 import { checkRateLimit, RateLimitConfig } from '@/lib/rate-limit';
+import { calculateBillingCost } from '@/lib/billing';
 
 // Validation constants
 const CHAT_MAX_LENGTH = 2000;
@@ -96,7 +97,14 @@ export async function POST(request: NextRequest) {
 
     // Check user balance
     const user = await getUserById(session.user.id);
-    if (!user || user.balance < model.costPerMessage) {
+    const estimatedCost = calculateBillingCost({
+      billingMode: model.billingMode,
+      billingPrice: model.billingPrice,
+      billingUnit: model.billingUnit,
+      legacyCost: model.costPerMessage,
+      tokens: 1000,
+    });
+    if (!user || user.balance < estimatedCost) {
       return NextResponse.json(
         { success: false, error: '积分不足' },
         { status: 400 }
@@ -146,15 +154,22 @@ export async function POST(request: NextRequest) {
 
     const data = await response.json();
     const assistantContent = data.choices?.[0]?.message?.content || '';
+    const usageTokens = Number(data?.usage?.total_tokens || data?.usage?.completion_tokens || 0);
+    const actualCost = calculateBillingCost({
+      billingMode: model.billingMode,
+      billingPrice: model.billingPrice,
+      billingUnit: model.billingUnit,
+      legacyCost: model.costPerMessage,
+      tokens: usageTokens,
+    });
 
-    // Deduct balance
-    await updateUserBalance(session.user.id, -model.costPerMessage, 'strict');
+    await updateUserBalance(session.user.id, -actualCost, 'strict');
 
     return NextResponse.json({
       success: true,
       data: {
         content: assistantContent,
-        cost: model.costPerMessage,
+        cost: actualCost,
       },
     });
   } catch (error) {

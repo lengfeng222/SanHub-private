@@ -10,6 +10,9 @@ import { fetchReferenceImage } from '@/lib/reference-image';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import { saveMediaAsync } from '@/lib/media-storage';
+import { calculateBillingCost } from '@/lib/billing';
+import { getVideoModelWithChannel } from '@/lib/db';
+import { getBaseUrlFromRequest } from '@/lib/epay';
 
 function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGenerateRequest['videoConfigObject'] {
   const raw = (input.videoConfigObject || input.video_config) as Record<string, unknown> | undefined;
@@ -22,12 +25,12 @@ function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGen
   }
 
   if (typeof raw.video_length === 'number' && Number.isFinite(raw.video_length)) {
-    output.video_length = Math.max(5, Math.min(30, Math.floor(raw.video_length)));
+    output.video_length = Math.max(1, Math.min(30, Math.floor(raw.video_length)));
   }
 
   if (typeof raw.resolution === 'string') {
     const resolution = raw.resolution.trim().toUpperCase();
-    if (resolution === 'SD' || resolution === 'HD') {
+    if (resolution) {
       output.resolution = resolution;
     }
   }
@@ -36,6 +39,37 @@ function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGen
     const preset = raw.preset.trim().toLowerCase();
     if (preset === 'fun' || preset === 'normal' || preset === 'spicy') {
       output.preset = preset;
+    }
+  }
+
+  if (typeof raw.generation_mode === 'string' && raw.generation_mode.trim()) {
+    output.generation_mode = raw.generation_mode.trim();
+  }
+
+  if (typeof raw.off_peak === 'boolean') {
+    output.off_peak = raw.off_peak;
+  }
+
+  if (typeof raw.quality_version === 'string' && raw.quality_version.trim()) {
+    output.quality_version = raw.quality_version.trim();
+  }
+
+  if (typeof raw.model_version === 'string' && raw.model_version.trim()) {
+    output.model_version = raw.model_version.trim();
+  }
+
+  if (typeof raw.version === 'string' && raw.version.trim()) {
+    output.version = raw.version.trim();
+  }
+
+  if (raw.extra_params && typeof raw.extra_params === 'object' && !Array.isArray(raw.extra_params)) {
+    try {
+      const cloned = JSON.parse(JSON.stringify(raw.extra_params)) as unknown;
+      if (cloned && typeof cloned === 'object' && !Array.isArray(cloned) && Object.keys(cloned).length > 0) {
+        output.extra_params = cloned as NonNullable<SoraGenerateRequest['videoConfigObject']>['extra_params'];
+      }
+    } catch {
+      // Ignore invalid extra params payload.
     }
   }
 
@@ -70,7 +104,7 @@ function getRateLimitDelayMs(attempt: number): number {
 
 async function generateWithRateLimitRetry(
   body: SoraGenerateRequest,
-  onProgress: (progress: number) => void,
+  onProgress: (progress: number, meta?: Record<string, unknown>) => void | Promise<void>,
   taskId: string
 ) {
   let attempt = 0;
@@ -99,45 +133,73 @@ async function processGenerationTask(
   prechargedCost: number,
   publicBaseUrl?: string
 ): Promise<void> {
+  const baseParams = {
+    model: body.model,
+    modelId: body.modelId,
+    aspectRatio: body.aspectRatio,
+    duration: body.duration,
+    videoConfigObject: body.videoConfigObject,
+  };
+  let promptParams: {
+    originalPrompt?: string;
+    filteredPrompt?: string;
+    translatedPrompt?: string;
+    processedPrompt?: string;
+  } = {};
+  let persistedUpstreamMeta: Record<string, unknown> = {};
+  let lastProgress = 0;
+
+  const buildPersistedParams = (
+    progress: number,
+    meta?: Record<string, unknown>
+  ): Generation['params'] => {
+    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+      const normalizedMeta = Object.fromEntries(
+        Object.entries(meta).filter(([, value]) => value !== undefined)
+      );
+
+      if (Object.keys(normalizedMeta).length > 0) {
+        persistedUpstreamMeta = {
+          ...persistedUpstreamMeta,
+          ...normalizedMeta,
+          upstreamUpdatedAt: Date.now(),
+        };
+      }
+    }
+
+    return {
+      ...baseParams,
+      ...promptParams,
+      ...persistedUpstreamMeta,
+      progress,
+    };
+  };
+
   try {
     console.log(`[Task ${generationId}] 开始处理生成任务`);
-
-    const baseParams = {
-      model: body.model,
-      modelId: body.modelId,
-      aspectRatio: body.aspectRatio,
-      duration: body.duration,
-      videoConfigObject: body.videoConfigObject,
-    };
-    let promptParams: {
-      originalPrompt?: string;
-      filteredPrompt?: string;
-      translatedPrompt?: string;
-      processedPrompt?: string;
-    } = {};
     
     // 更新状态为 processing
     await updateGeneration(generationId, {
       status: 'processing',
-      params: {
-        ...baseParams,
-        progress: 0,
-      },
+      params: buildPersistedParams(0),
     }).catch(err => {
       console.error(`[Task ${generationId}] 更新状态失败:`, err);
     });
 
     // 进度更新回调（节流：每5%更新一次）
-    let lastProgress = 0;
-    const onProgress = async (progress: number) => {
-      if (progress - lastProgress >= 5 || progress >= 100) {
+    let lastMetaSignature = '';
+    const onProgress = async (progress: number, meta?: Record<string, unknown>) => {
+      const nextMeta =
+        meta && typeof meta === 'object' && !Array.isArray(meta)
+          ? meta
+          : {};
+      const nextMetaSignature = JSON.stringify(nextMeta);
+
+      if (progress - lastProgress >= 5 || progress >= 100 || nextMetaSignature !== lastMetaSignature) {
         lastProgress = progress;
+        lastMetaSignature = nextMetaSignature;
         await updateGeneration(generationId, { 
-          params: {
-            ...baseParams,
-            ...promptParams,
-            progress,
-          },
+          params: buildPersistedParams(progress, nextMeta),
         }).catch(err => {
           console.error(`[Task ${generationId}] 更新进度失败:`, err);
         });
@@ -160,11 +222,7 @@ async function processGenerationTask(
           prompt: processed.processedPrompt,
         };
         await updateGeneration(generationId, {
-          params: {
-            ...baseParams,
-            ...promptParams,
-            progress: lastProgress,
-          },
+          params: buildPersistedParams(lastProgress),
         }).catch(err => {
           console.error(`[Task ${generationId}] 更新提示词处理结果失败:`, err);
         });
@@ -187,13 +245,14 @@ async function processGenerationTask(
       status: 'completed',
       resultUrl: savedUrl,
       params: {
-        ...baseParams,
-        ...promptParams,
+        ...buildPersistedParams(100, {
+          upstreamFinal: true,
+          upstreamResultUrl: result.url,
+        }),
         videoId: result.videoId,
         videoChannelId: result.videoChannelId,
         permalink: result.permalink,
         revised_prompt: result.revised_prompt,
-        progress: 100,
       },
     }).catch(err => {
       console.error(`[Task ${generationId}] 更新完成状态失败:`, err);
@@ -215,9 +274,14 @@ async function processGenerationTask(
     
     // 更新为失败状态（用 try-catch 确保不会抛出）
     try {
+      const failedParams = buildPersistedParams(Math.max(lastProgress, 0));
+      if (errorMessage.includes('超时')) {
+        failedParams.upstreamStatusGroup = 'timeout';
+      }
       await updateGeneration(generationId, {
         status: 'failed',
         errorMessage,
+        params: failedParams,
       });
     } catch (updateErr) {
       console.error(`[Task ${generationId}] 更新失败状态时出错:`, updateErr);
@@ -268,10 +332,11 @@ export async function POST(request: NextRequest) {
 
     await assertPromptsAllowed([body.prompt, body.style_id]);
 
-    const origin = new URL(request.url).origin;
+    const origin = getBaseUrlFromRequest(request);
     const normalizedVideoConfigObject = normalizeIncomingVideoConfigObject(body);
     const normalizedBody: SoraGenerateRequest = {
       ...body,
+      publicBaseUrl: origin,
       videoConfigObject: normalizedVideoConfigObject,
       video_config: normalizedVideoConfigObject,
       files: body.files ? [...body.files] : [],
@@ -299,16 +364,35 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '用户不存在' }, { status: 401 });
     }
 
-    // 预估成本
-    const normalizedDuration = (body.duration || body.model || '').toLowerCase();
-    const effectiveDurationSeconds = normalizedVideoConfigObject?.video_length;
-    const estimatedCost = normalizedDuration.includes('25')
-      ? systemConfig.pricing.soraVideo25s
-      : effectiveDurationSeconds && effectiveDurationSeconds >= 15
-        ? systemConfig.pricing.soraVideo15s
-        : normalizedDuration.includes('15')
-        ? systemConfig.pricing.soraVideo15s
-        : systemConfig.pricing.soraVideo10s;
+    const videoModelConfig = normalizedBody.modelId
+      ? await getVideoModelWithChannel(normalizedBody.modelId)
+      : null;
+    if (videoModelConfig?.model?.name) {
+      normalizedBody.model = videoModelConfig.model.name;
+    }
+    const configuredSeconds =
+      normalizedVideoConfigObject?.video_length
+      || (() => {
+        const matched = String(body.duration || body.model || '').match(/(\d+)/);
+        return matched ? Number.parseInt(matched[1], 10) : 8;
+      })();
+    const estimatedCost = videoModelConfig
+      ? calculateBillingCost({
+          billingMode: videoModelConfig.model.billingMode,
+          billingPrice: videoModelConfig.model.billingPrice,
+          billingUnit: videoModelConfig.model.billingUnit,
+          legacyCost: videoModelConfig.model.durations?.find((item) => item.value === videoModelConfig.model.defaultDuration)?.cost || systemConfig.pricing.soraVideo10s,
+          seconds: configuredSeconds,
+        })
+      : (() => {
+          const normalizedDuration = (body.duration || body.model || '').toLowerCase();
+          const effectiveDurationSeconds = normalizedVideoConfigObject?.video_length;
+          if (normalizedDuration.includes('25')) return systemConfig.pricing.soraVideo25s;
+          if ((effectiveDurationSeconds && effectiveDurationSeconds >= 15) || normalizedDuration.includes('15')) {
+            return systemConfig.pricing.soraVideo15s;
+          }
+          return systemConfig.pricing.soraVideo10s;
+        })();
 
     // 检查余额
     if (user.balance < estimatedCost) {
@@ -342,8 +426,8 @@ export async function POST(request: NextRequest) {
         type,
         prompt: body.prompt || '',
         params: {
-          model: body.model,
-          modelId: body.modelId,
+          model: normalizedBody.model,
+          modelId: normalizedBody.modelId,
           aspectRatio: body.aspectRatio,
           duration: body.duration,
           videoConfigObject: normalizedVideoConfigObject,

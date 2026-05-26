@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createUser, getSystemConfig } from '@/lib/db';
 import { checkRateLimit, RateLimitConfig } from '@/lib/rate-limit';
+import { verifyRegisterEmailCode } from '@/lib/email-verification';
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,11 +13,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { name, email, password } = await request.json();
+    const { name, email, password, emailCode } = await request.json();
 
-    if (!name || !email || !password) {
+    if (!name || !email || !password || !emailCode) {
       return NextResponse.json(
         { error: '请填写所有必填字段' },
+        { status: 400 }
+      );
+    }
+
+    const emailCodeResult = await verifyRegisterEmailCode(email, emailCode);
+    if (!emailCodeResult.ok) {
+      return NextResponse.json(
+        { error: emailCodeResult.error || '邮箱验证码错误' },
         { status: 400 }
       );
     }

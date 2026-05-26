@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const isValid = verifyCaptcha(id, code);
+    const isValid = await verifyCaptcha(id, code);
 
     if (!isValid) {
       return NextResponse.json(

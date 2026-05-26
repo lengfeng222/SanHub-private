@@ -4,6 +4,7 @@ import { authOptions } from '@/lib/auth';
 import { getSystemConfig, updateSystemConfig } from '@/lib/db';
 import { syncUnusedInviteCodeBonuses } from '@/lib/db-codes';
 import type { ImageBucketConfig, ImageStorageConfig } from '@/types';
+import { normalizeBillingMode } from '@/lib/billing';
 
 function normalizePositiveInt(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -208,6 +209,55 @@ export async function POST(request: NextRequest) {
         updates.imageStorage,
         current.imageStorage
       );
+    }
+
+    if (updates.audioProvider && typeof updates.audioProvider === 'object') {
+      const audio = updates.audioProvider as Record<string, unknown>;
+      nextUpdates.audioProvider = {
+        musicBaseUrl: typeof audio.musicBaseUrl === 'string' ? audio.musicBaseUrl.trim() : current.audioProvider.musicBaseUrl,
+        musicApiKey: typeof audio.musicApiKey === 'string' ? audio.musicApiKey.trim() : current.audioProvider.musicApiKey,
+        musicModel: typeof audio.musicModel === 'string' ? audio.musicModel.trim() : current.audioProvider.musicModel,
+        musicEndpointPath: typeof audio.musicEndpointPath === 'string' ? audio.musicEndpointPath.trim() : current.audioProvider.musicEndpointPath,
+        musicCost: normalizeNonNegativeInt(audio.musicCost, current.audioProvider.musicCost),
+        musicBillingMode: normalizeBillingMode(audio.musicBillingMode, current.audioProvider.musicBillingMode || 'per_call'),
+        musicBillingPrice: normalizeNonNegativeInt(audio.musicBillingPrice, current.audioProvider.musicBillingPrice || current.audioProvider.musicCost),
+        musicBillingUnit: normalizePositiveInt(audio.musicBillingUnit, current.audioProvider.musicBillingUnit || 1),
+        voiceBaseUrl: typeof audio.voiceBaseUrl === 'string' ? audio.voiceBaseUrl.trim() : current.audioProvider.voiceBaseUrl,
+        voiceApiKey: typeof audio.voiceApiKey === 'string' ? audio.voiceApiKey.trim() : current.audioProvider.voiceApiKey,
+        voiceModel: typeof audio.voiceModel === 'string' ? audio.voiceModel.trim() : current.audioProvider.voiceModel,
+        voiceVoice: typeof audio.voiceVoice === 'string' ? audio.voiceVoice.trim() : current.audioProvider.voiceVoice,
+        voiceFormat: typeof audio.voiceFormat === 'string' ? audio.voiceFormat.trim() : current.audioProvider.voiceFormat,
+        voiceEndpointPath: typeof audio.voiceEndpointPath === 'string' ? audio.voiceEndpointPath.trim() : current.audioProvider.voiceEndpointPath,
+        voiceCost: normalizeNonNegativeInt(audio.voiceCost, current.audioProvider.voiceCost),
+        voiceBillingMode: normalizeBillingMode(audio.voiceBillingMode, current.audioProvider.voiceBillingMode || 'per_call'),
+        voiceBillingPrice: normalizeNonNegativeInt(audio.voiceBillingPrice, current.audioProvider.voiceBillingPrice || current.audioProvider.voiceCost),
+        voiceBillingUnit: normalizePositiveInt(audio.voiceBillingUnit, current.audioProvider.voiceBillingUnit || 1),
+      };
+    }
+
+    if (updates.paymentProvider && typeof updates.paymentProvider === 'object') {
+      const payment = updates.paymentProvider as Record<string, unknown>;
+      const rawPayTypes = Array.isArray(payment.payTypes)
+        ? payment.payTypes
+        : typeof payment.payTypes === 'string'
+          ? payment.payTypes.split(',')
+          : current.paymentProvider.payTypes;
+      const payTypes = rawPayTypes
+        .map((item) => String(item).trim())
+        .filter((item) => ['alipay', 'wxpay', 'qqpay', 'bank'].includes(item));
+
+      nextUpdates.paymentProvider = {
+        enabled: typeof payment.enabled === 'boolean' ? payment.enabled : current.paymentProvider.enabled,
+        provider: 'epay',
+        apiUrl: typeof payment.apiUrl === 'string' ? payment.apiUrl.trim() : current.paymentProvider.apiUrl,
+        pid: typeof payment.pid === 'string' ? payment.pid.trim() : current.paymentProvider.pid,
+        key: typeof payment.key === 'string' ? payment.key.trim() : current.paymentProvider.key,
+        notifyUrl: typeof payment.notifyUrl === 'string' ? payment.notifyUrl.trim() : current.paymentProvider.notifyUrl,
+        returnUrl: typeof payment.returnUrl === 'string' ? payment.returnUrl.trim() : current.paymentProvider.returnUrl,
+        pointRate: normalizePositiveInt(payment.pointRate, current.paymentProvider.pointRate),
+        minAmount: normalizePositiveInt(payment.minAmount, current.paymentProvider.minAmount),
+        payTypes: payTypes.length ? payTypes : current.paymentProvider.payTypes,
+      };
     }
 
     const config = await updateSystemConfig(nextUpdates);

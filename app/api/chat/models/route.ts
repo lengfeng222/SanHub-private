@@ -5,7 +5,7 @@ import { getChatModels, createChatModel, updateChatModel, deleteChatModel } from
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession(authOptions).catch(() => null);
     if (!session?.user) {
       return NextResponse.json({ success: false, error: '未登录' }, { status: 401 });
     }
@@ -30,6 +30,10 @@ export async function GET(request: NextRequest) {
       maxTokens: m.maxTokens,
       enabled: m.enabled,
       costPerMessage: m.costPerMessage,
+      billingMode: m.billingMode,
+      billingPrice: m.billingPrice,
+      billingUnit: m.billingUnit,
+      imageUrl: m.imageUrl,
     }));
 
     return NextResponse.json({ success: true, data: safeModels });
@@ -44,13 +48,13 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession(authOptions).catch(() => null);
     if (!session?.user || session.user.role !== 'admin') {
       return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
     }
 
     const body = await request.json();
-    const { name, apiUrl, apiKey, modelId, supportsVision, maxTokens, costPerMessage, enabled } = body;
+    const { name, apiUrl, apiKey, modelId, supportsVision, maxTokens, costPerMessage, billingMode, billingPrice, billingUnit, imageUrl, enabled } = body;
 
     if (!name || !apiUrl || !apiKey || !modelId) {
       return NextResponse.json({ success: false, error: '缺少必要参数' }, { status: 400 });
@@ -64,6 +68,10 @@ export async function POST(request: NextRequest) {
       supportsVision: supportsVision ?? false,
       maxTokens: maxTokens ?? 4096,
       costPerMessage: costPerMessage ?? 1,
+      billingMode: billingMode ?? 'per_call',
+      billingPrice: billingPrice ?? costPerMessage ?? 1,
+      billingUnit: billingUnit ?? 1,
+      imageUrl: imageUrl || undefined,
       enabled: enabled ?? true,
     });
 
@@ -79,7 +87,7 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession(authOptions).catch(() => null);
     if (!session?.user || session.user.role !== 'admin') {
       return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
     }
@@ -108,7 +116,7 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await getServerSession(authOptions).catch(() => null);
     if (!session?.user || session.user.role !== 'admin') {
       return NextResponse.json({ success: false, error: '无权限' }, { status: 403 });
     }

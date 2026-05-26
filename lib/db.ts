@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import { createDatabaseAdapter, type DatabaseAdapter } from './db-adapter';
 import { cache, CacheKeys, CacheTTL, withCache } from './cache';
 import { buildSafeVideoModels } from './video-model-normalizer';
+import { normalizeBillingMode } from './billing';
 
 // ========================================
 // 数据库连接（支持 SQLite �?MySQL�?
@@ -43,7 +44,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS generations (
   id VARCHAR(36) PRIMARY KEY,
   user_id VARCHAR(36) NOT NULL,
-  type ENUM('sora-video', 'sora-image', 'gemini-image', 'zimage-image', 'gitee-image') NOT NULL,
+  type ENUM('sora-video', 'sora-image', 'gemini-image', 'zimage-image', 'gitee-image', 'music', 'voice') NOT NULL,
   prompt TEXT,
   params TEXT,
   result_url LONGTEXT,
@@ -96,7 +97,7 @@ CREATE TABLE IF NOT EXISTS system_config (
   pricing_gitee_image INT DEFAULT 30,
   pricing_chat INT DEFAULT 1,
   register_enabled TINYINT(1) DEFAULT 1,
-  default_balance INT DEFAULT 100,
+  default_balance INT DEFAULT 50,
   prompt_filter_enabled TINYINT(1) DEFAULT 0,
   prompt_filter_model_id VARCHAR(36) DEFAULT '',
   prompt_filter_prompt TEXT,
@@ -108,7 +109,35 @@ CREATE TABLE IF NOT EXISTS system_config (
   rate_limit_image_max_requests INT DEFAULT 30,
   rate_limit_image_window_seconds INT DEFAULT 60,
   rate_limit_video_max_requests INT DEFAULT 30,
-  rate_limit_video_window_seconds INT DEFAULT 60
+  rate_limit_video_window_seconds INT DEFAULT 60,
+  music_base_url VARCHAR(500) DEFAULT '',
+  music_api_key TEXT,
+  music_model VARCHAR(200) DEFAULT 'music-1',
+  music_endpoint_path VARCHAR(200) DEFAULT '/v1/audio/generations',
+  music_cost INT DEFAULT 10,
+  music_billing_mode VARCHAR(50) DEFAULT 'per_call',
+  music_billing_price INT DEFAULT 10,
+  music_billing_unit INT DEFAULT 1,
+  voice_base_url VARCHAR(500) DEFAULT '',
+  voice_api_key TEXT,
+  voice_model VARCHAR(200) DEFAULT 'tts-1',
+  voice_voice VARCHAR(100) DEFAULT 'alloy',
+  voice_format VARCHAR(50) DEFAULT 'mp3',
+  voice_endpoint_path VARCHAR(200) DEFAULT '/v1/audio/speech',
+  voice_cost INT DEFAULT 5,
+  voice_billing_mode VARCHAR(50) DEFAULT 'per_call',
+  voice_billing_price INT DEFAULT 5,
+  voice_billing_unit INT DEFAULT 1,
+  payment_enabled TINYINT(1) DEFAULT 0,
+  payment_provider VARCHAR(50) DEFAULT 'epay',
+  payment_api_url VARCHAR(500) DEFAULT 'https://vip1.zhunfu.cn/',
+  payment_pid VARCHAR(100) DEFAULT '',
+  payment_key TEXT,
+  payment_notify_url VARCHAR(500) DEFAULT '',
+  payment_return_url VARCHAR(500) DEFAULT '',
+  payment_point_rate INT DEFAULT 100,
+  payment_min_amount INT DEFAULT 1,
+  payment_pay_types VARCHAR(100) DEFAULT 'alipay'
 );
 
 -- 聊天模型表
@@ -122,6 +151,10 @@ CREATE TABLE IF NOT EXISTS chat_models (
   max_tokens INT DEFAULT 128000,
   enabled TINYINT(1) DEFAULT 1,
   cost_per_message INT DEFAULT 1,
+  billing_mode VARCHAR(50) DEFAULT 'per_call',
+  billing_price INT DEFAULT 1,
+  billing_unit INT DEFAULT 1,
+  image_url TEXT,
   created_at BIGINT NOT NULL,
   INDEX idx_enabled (enabled)
 );
@@ -181,15 +214,27 @@ CREATE TABLE IF NOT EXISTS workspaces (
 `;
 
 let initialized = false;
+let initializationPromise: Promise<void> | null = null;
 
 export async function initializeDatabase(): Promise<void> {
+  if (initialized) return;
+  if (initializationPromise) return initializationPromise;
+
+  initializationPromise = initializeDatabaseInternal().finally(() => {
+    initializationPromise = null;
+  });
+
+  return initializationPromise;
+}
+
+async function initializeDatabaseInternal(): Promise<void> {
+  if (initialized) return;
+
   const db = getAdapter();
 
   // 渠道表始终尝试创建（幂等操作，确保新表被创建）
   await initializeImageChannelsTablesInternal(db);
   await initializeVideoChannelsTablesInternal(db);
-
-  if (initialized) return;
 
   const statements = CREATE_TABLES_SQL.split(';').filter((s) => s.trim());
 
@@ -264,6 +309,35 @@ export async function initializeDatabase(): Promise<void> {
     await db.execute('ALTER TABLE generations ADD COLUMN balance_refunded TINYINT(1) DEFAULT 0');
   } catch {
     // 字段已存在，忽略错误
+  }
+
+  const additiveColumns = [
+    'ALTER TABLE chat_models ADD COLUMN billing_mode VARCHAR(50) DEFAULT \'per_call\'',
+    'ALTER TABLE chat_models ADD COLUMN billing_price INT DEFAULT 1',
+    'ALTER TABLE chat_models ADD COLUMN billing_unit INT DEFAULT 1',
+    'ALTER TABLE chat_models ADD COLUMN image_url TEXT',
+    'ALTER TABLE image_models ADD COLUMN billing_mode VARCHAR(50) DEFAULT \'per_call\'',
+    'ALTER TABLE image_models ADD COLUMN billing_price INT DEFAULT 10',
+    'ALTER TABLE image_models ADD COLUMN billing_unit INT DEFAULT 1',
+    'ALTER TABLE image_models ADD COLUMN image_url TEXT',
+    'ALTER TABLE video_models ADD COLUMN billing_mode VARCHAR(50) DEFAULT \'per_second\'',
+    'ALTER TABLE video_models ADD COLUMN billing_price INT DEFAULT 12',
+    'ALTER TABLE video_models ADD COLUMN billing_unit INT DEFAULT 1',
+    'ALTER TABLE video_models ADD COLUMN image_url TEXT',
+    'ALTER TABLE system_config ADD COLUMN music_billing_mode VARCHAR(50) DEFAULT \'per_call\'',
+    'ALTER TABLE system_config ADD COLUMN music_billing_price INT DEFAULT 10',
+    'ALTER TABLE system_config ADD COLUMN music_billing_unit INT DEFAULT 1',
+    'ALTER TABLE system_config ADD COLUMN voice_billing_mode VARCHAR(50) DEFAULT \'per_call\'',
+    'ALTER TABLE system_config ADD COLUMN voice_billing_price INT DEFAULT 5',
+    'ALTER TABLE system_config ADD COLUMN voice_billing_unit INT DEFAULT 1',
+  ];
+
+  for (const sql of additiveColumns) {
+    try {
+      await db.execute(sql);
+    } catch {
+      // ignore
+    }
   }
 
   // 确保 generations.params 列存在（用于存储 permalink / revised_prompt 等扩展信息）
@@ -487,12 +561,12 @@ export async function initializeDatabase(): Promise<void> {
 
   // 添加网站配置字段
   try {
-    await db.execute("ALTER TABLE system_config ADD COLUMN site_name VARCHAR(100) DEFAULT 'SANHUB'");
+    await db.execute("ALTER TABLE system_config ADD COLUMN site_name VARCHAR(100) DEFAULT '幻途'");
   } catch {
     // 字段已存在，忽略错误
   }
   try {
-    await db.execute("ALTER TABLE system_config ADD COLUMN site_tagline VARCHAR(200) DEFAULT 'Let Imagination Come Alive'");
+    await db.execute("ALTER TABLE system_config ADD COLUMN site_tagline VARCHAR(200) DEFAULT '幻途 AI 内容创作平台'");
   } catch {
     // 字段已存在，忽略错误
   }
@@ -507,17 +581,17 @@ export async function initializeDatabase(): Promise<void> {
     // 字段已存在，忽略错误
   }
   try {
-    await db.execute("ALTER TABLE system_config ADD COLUMN contact_email VARCHAR(200) DEFAULT 'support@sanhub.com'");
+    await db.execute("ALTER TABLE system_config ADD COLUMN contact_email VARCHAR(200) DEFAULT 'support@aigcone.cn'");
   } catch {
     // 字段已存在，忽略错误
   }
   try {
-    await db.execute("ALTER TABLE system_config ADD COLUMN site_copyright VARCHAR(200) DEFAULT 'Copyright © 2025 SANHUB'");
+    await db.execute("ALTER TABLE system_config ADD COLUMN site_copyright VARCHAR(200) DEFAULT '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。'");
   } catch {
     // 字段已存在，忽略错误
   }
   try {
-    await db.execute("ALTER TABLE system_config ADD COLUMN site_powered_by VARCHAR(200) DEFAULT 'Powered by OpenAI Sora & Google Gemini'");
+    await db.execute("ALTER TABLE system_config ADD COLUMN site_powered_by VARCHAR(200) DEFAULT '幻途 · Huantu AI'");
   } catch {
     // 字段已存在，忽略错误
   }
@@ -612,10 +686,54 @@ export async function initializeDatabase(): Promise<void> {
     // 字段已存在，忽略错误
   }
 
+  // 添加音频 API 配置字段
+  const audioColumns = [
+    "ALTER TABLE system_config ADD COLUMN music_base_url VARCHAR(500) DEFAULT ''",
+    'ALTER TABLE system_config ADD COLUMN music_api_key TEXT',
+    "ALTER TABLE system_config ADD COLUMN music_model VARCHAR(200) DEFAULT 'music-1'",
+    "ALTER TABLE system_config ADD COLUMN music_endpoint_path VARCHAR(200) DEFAULT '/v1/audio/generations'",
+    'ALTER TABLE system_config ADD COLUMN music_cost INT DEFAULT 10',
+    "ALTER TABLE system_config ADD COLUMN voice_base_url VARCHAR(500) DEFAULT ''",
+    'ALTER TABLE system_config ADD COLUMN voice_api_key TEXT',
+    "ALTER TABLE system_config ADD COLUMN voice_model VARCHAR(200) DEFAULT 'tts-1'",
+    "ALTER TABLE system_config ADD COLUMN voice_voice VARCHAR(100) DEFAULT 'alloy'",
+    "ALTER TABLE system_config ADD COLUMN voice_format VARCHAR(50) DEFAULT 'mp3'",
+    "ALTER TABLE system_config ADD COLUMN voice_endpoint_path VARCHAR(200) DEFAULT '/v1/audio/speech'",
+    'ALTER TABLE system_config ADD COLUMN voice_cost INT DEFAULT 5',
+  ];
+  for (const sql of audioColumns) {
+    try {
+      await db.execute(sql);
+    } catch {
+      // 字段已存在，忽略错误
+    }
+  }
+
+  // 添加易支付充值配置字段
+  const paymentColumns = [
+    'ALTER TABLE system_config ADD COLUMN payment_enabled TINYINT(1) DEFAULT 0',
+    "ALTER TABLE system_config ADD COLUMN payment_provider VARCHAR(50) DEFAULT 'epay'",
+    "ALTER TABLE system_config ADD COLUMN payment_api_url VARCHAR(500) DEFAULT 'https://vip1.zhunfu.cn/'",
+    "ALTER TABLE system_config ADD COLUMN payment_pid VARCHAR(100) DEFAULT ''",
+    'ALTER TABLE system_config ADD COLUMN payment_key TEXT',
+    "ALTER TABLE system_config ADD COLUMN payment_notify_url VARCHAR(500) DEFAULT ''",
+    "ALTER TABLE system_config ADD COLUMN payment_return_url VARCHAR(500) DEFAULT ''",
+    'ALTER TABLE system_config ADD COLUMN payment_point_rate INT DEFAULT 100',
+    'ALTER TABLE system_config ADD COLUMN payment_min_amount INT DEFAULT 1',
+    "ALTER TABLE system_config ADD COLUMN payment_pay_types VARCHAR(100) DEFAULT 'alipay'",
+  ];
+  for (const sql of paymentColumns) {
+    try {
+      await db.execute(sql);
+    } catch {
+      // 字段已存在，忽略错误
+    }
+  }
+
   // 更新 generations 表的 type 字段以支持 gitee-image（MySQL 需要修改 ENUM）
   if (dbType === 'mysql') {
     try {
-      await db.execute("ALTER TABLE generations MODIFY COLUMN type ENUM('sora-video', 'sora-image', 'gemini-image', 'zimage-image', 'gitee-image') NOT NULL");
+      await db.execute("ALTER TABLE generations MODIFY COLUMN type ENUM('sora-video', 'sora-image', 'gemini-image', 'zimage-image', 'gitee-image', 'music', 'voice') NOT NULL");
     } catch {
       // 忽略错误
     }
@@ -1570,7 +1688,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
           giteeImage: 30,
         },
         registerEnabled: true,
-        defaultBalance: 100,
+        defaultBalance: 50,
         featureFlags: {
           squareEnabled: true,
           gachaEnabled: true,
@@ -1600,13 +1718,13 @@ export async function getSystemConfig(): Promise<SystemConfig> {
           characterCardLimit: 0,
         },
         siteConfig: {
-          siteName: 'SANHUB',
-          siteTagline: 'Let Imagination Come Alive',
-          siteDescription: '「SANHUB」是专为 AI 创作打造的一站式平台',
-          siteSubDescription: '我们融合了 Sora 视频生成、Gemini 图像创作与多模型 AI 对话。在这里，技术壁垒已然消融，你唯一的使命就是释放纯粹的想象。',
-          contactEmail: 'support@sanhub.com',
-          copyright: 'Copyright © 2025 SANHUB',
-          poweredBy: 'Powered by OpenAI Sora & Google Gemini',
+          siteName: '幻途',
+          siteTagline: '幻途 AI 内容创作平台',
+          siteDescription: '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
+          siteSubDescription: '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+          contactEmail: 'support@aigcone.cn',
+          copyright: '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
+          poweredBy: '幻途 · Huantu AI',
         },
         disabledModels: {
           imageModels: [],
@@ -1629,6 +1747,38 @@ export async function getSystemConfig(): Promise<SystemConfig> {
           imageWindowSeconds: 60,
           videoMaxRequests: 30,
           videoWindowSeconds: 60,
+        },
+        audioProvider: {
+          musicBaseUrl: process.env.MUSIC_BASE_URL || process.env.AUDIO_BASE_URL || '',
+          musicApiKey: process.env.MUSIC_API_KEY || process.env.AUDIO_API_KEY || '',
+          musicModel: process.env.MUSIC_MODEL || 'music-1',
+          musicEndpointPath: process.env.MUSIC_ENDPOINT_PATH || '/v1/audio/generations',
+          musicCost: Number(process.env.MUSIC_COST || 10),
+          musicBillingMode: 'per_call',
+          musicBillingPrice: Number(process.env.MUSIC_COST || 10),
+          musicBillingUnit: 1,
+          voiceBaseUrl: process.env.VOICE_BASE_URL || process.env.AUDIO_BASE_URL || process.env.OPENAI_BASE_URL || '',
+          voiceApiKey: process.env.VOICE_API_KEY || process.env.AUDIO_API_KEY || process.env.OPENAI_API_KEY || '',
+          voiceModel: process.env.VOICE_MODEL || 'tts-1',
+          voiceVoice: process.env.VOICE_VOICE || 'alloy',
+          voiceFormat: process.env.VOICE_FORMAT || 'mp3',
+          voiceEndpointPath: process.env.VOICE_ENDPOINT_PATH || '/v1/audio/speech',
+          voiceCost: Number(process.env.VOICE_COST || 5),
+          voiceBillingMode: 'per_call',
+          voiceBillingPrice: Number(process.env.VOICE_COST || 5),
+          voiceBillingUnit: 1,
+        },
+        paymentProvider: {
+          enabled: process.env.EPAY_ENABLED === 'true',
+          provider: 'epay',
+          apiUrl: process.env.EPAY_API_URL || 'https://vip1.zhunfu.cn/',
+          pid: process.env.EPAY_PID || '',
+          key: process.env.EPAY_KEY || '',
+          notifyUrl: process.env.EPAY_NOTIFY_URL || '',
+          returnUrl: process.env.EPAY_RETURN_URL || '',
+          pointRate: Number(process.env.EPAY_POINT_RATE || 100),
+          minAmount: Number(process.env.EPAY_MIN_AMOUNT || 1),
+          payTypes: (process.env.EPAY_PAY_TYPES || 'alipay').split(',').map((item) => item.trim()).filter(Boolean),
         },
       };
     }
@@ -1663,7 +1813,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         giteeImage: row.pricing_gitee_image || 30,
       },
       registerEnabled: Boolean(row.register_enabled),
-      defaultBalance: row.default_balance || 100,
+      defaultBalance: row.default_balance || 50,
       featureFlags: {
         squareEnabled: row.square_enabled !== 0,
         gachaEnabled: row.gacha_enabled !== 0,
@@ -1693,13 +1843,13 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         characterCardLimit: row.daily_limit_character_card || 0,
       },
       siteConfig: {
-        siteName: row.site_name || 'SANHUB',
-        siteTagline: row.site_tagline || 'Let Imagination Come Alive',
-        siteDescription: row.site_description || '「SANHUB」是专为 AI 创作打造的一站式平台',
-        siteSubDescription: row.site_sub_description || '我们融合了 Sora 视频生成、Gemini 图像创作与多模型 AI 对话。在这里，技术壁垒已然消融，你唯一的使命就是释放纯粹的想象。',
-        contactEmail: row.contact_email || 'support@sanhub.com',
-        copyright: row.site_copyright || 'Copyright © 2025 SANHUB',
-        poweredBy: row.site_powered_by || 'Powered by OpenAI Sora & Google Gemini',
+        siteName: row.site_name || '幻途',
+        siteTagline: row.site_tagline || '幻途 AI 内容创作平台',
+        siteDescription: row.site_description || '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
+        siteSubDescription: row.site_sub_description || '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+        contactEmail: row.contact_email || 'support@aigcone.cn',
+        copyright: row.site_copyright || '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
+        poweredBy: row.site_powered_by || '幻途 · Huantu AI',
       },
       disabledModels: {
         imageModels: row.disabled_image_models ? JSON.parse(row.disabled_image_models) : [],
@@ -1722,6 +1872,41 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         imageWindowSeconds: Number(row.rate_limit_image_window_seconds) || 60,
         videoMaxRequests: Number(row.rate_limit_video_max_requests) || 30,
         videoWindowSeconds: Number(row.rate_limit_video_window_seconds) || 60,
+      },
+      audioProvider: {
+        musicBaseUrl: row.music_base_url || process.env.MUSIC_BASE_URL || process.env.AUDIO_BASE_URL || '',
+        musicApiKey: row.music_api_key || process.env.MUSIC_API_KEY || process.env.AUDIO_API_KEY || '',
+        musicModel: row.music_model || process.env.MUSIC_MODEL || 'music-1',
+        musicEndpointPath: row.music_endpoint_path || process.env.MUSIC_ENDPOINT_PATH || '/v1/audio/generations',
+        musicCost: Number(row.music_cost) || Number(process.env.MUSIC_COST || 10),
+        musicBillingMode: normalizeBillingMode(row.music_billing_mode, 'per_call'),
+        musicBillingPrice: Number(row.music_billing_price) || Number(row.music_cost) || Number(process.env.MUSIC_COST || 10),
+        musicBillingUnit: Number(row.music_billing_unit) || 1,
+        voiceBaseUrl: row.voice_base_url || process.env.VOICE_BASE_URL || process.env.AUDIO_BASE_URL || process.env.OPENAI_BASE_URL || '',
+        voiceApiKey: row.voice_api_key || process.env.VOICE_API_KEY || process.env.AUDIO_API_KEY || process.env.OPENAI_API_KEY || '',
+        voiceModel: row.voice_model || process.env.VOICE_MODEL || 'tts-1',
+        voiceVoice: row.voice_voice || process.env.VOICE_VOICE || 'alloy',
+        voiceFormat: row.voice_format || process.env.VOICE_FORMAT || 'mp3',
+        voiceEndpointPath: row.voice_endpoint_path || process.env.VOICE_ENDPOINT_PATH || '/v1/audio/speech',
+        voiceCost: Number(row.voice_cost) || Number(process.env.VOICE_COST || 5),
+        voiceBillingMode: normalizeBillingMode(row.voice_billing_mode, 'per_call'),
+        voiceBillingPrice: Number(row.voice_billing_price) || Number(row.voice_cost) || Number(process.env.VOICE_COST || 5),
+        voiceBillingUnit: Number(row.voice_billing_unit) || 1,
+      },
+      paymentProvider: {
+        enabled: Boolean(row.payment_enabled),
+        provider: 'epay',
+        apiUrl: row.payment_api_url || process.env.EPAY_API_URL || 'https://vip1.zhunfu.cn/',
+        pid: row.payment_pid || process.env.EPAY_PID || '',
+        key: row.payment_key || process.env.EPAY_KEY || '',
+        notifyUrl: row.payment_notify_url || process.env.EPAY_NOTIFY_URL || '',
+        returnUrl: row.payment_return_url || process.env.EPAY_RETURN_URL || '',
+        pointRate: Number(row.payment_point_rate) || Number(process.env.EPAY_POINT_RATE || 100),
+        minAmount: Number(row.payment_min_amount) || Number(process.env.EPAY_MIN_AMOUNT || 1),
+        payTypes: String(row.payment_pay_types || process.env.EPAY_PAY_TYPES || 'alipay')
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
       },
     };
   });
@@ -1795,6 +1980,40 @@ export async function updateSystemConfig(
   if (updates.picuiBaseUrl !== undefined) {
     fields.push('picui_base_url = ?');
     values.push(updates.picuiBaseUrl);
+  }
+  if (updates.audioProvider) {
+    const a = updates.audioProvider;
+    if (a.musicBaseUrl !== undefined) { fields.push('music_base_url = ?'); values.push(a.musicBaseUrl); }
+    if (a.musicApiKey !== undefined) { fields.push('music_api_key = ?'); values.push(a.musicApiKey); }
+    if (a.musicModel !== undefined) { fields.push('music_model = ?'); values.push(a.musicModel); }
+    if (a.musicEndpointPath !== undefined) { fields.push('music_endpoint_path = ?'); values.push(a.musicEndpointPath); }
+    if (a.musicCost !== undefined) { fields.push('music_cost = ?'); values.push(a.musicCost); }
+    if (a.musicBillingMode !== undefined) { fields.push('music_billing_mode = ?'); values.push(a.musicBillingMode); }
+    if (a.musicBillingPrice !== undefined) { fields.push('music_billing_price = ?'); values.push(a.musicBillingPrice); }
+    if (a.musicBillingUnit !== undefined) { fields.push('music_billing_unit = ?'); values.push(a.musicBillingUnit); }
+    if (a.voiceBaseUrl !== undefined) { fields.push('voice_base_url = ?'); values.push(a.voiceBaseUrl); }
+    if (a.voiceApiKey !== undefined) { fields.push('voice_api_key = ?'); values.push(a.voiceApiKey); }
+    if (a.voiceModel !== undefined) { fields.push('voice_model = ?'); values.push(a.voiceModel); }
+    if (a.voiceVoice !== undefined) { fields.push('voice_voice = ?'); values.push(a.voiceVoice); }
+    if (a.voiceFormat !== undefined) { fields.push('voice_format = ?'); values.push(a.voiceFormat); }
+    if (a.voiceEndpointPath !== undefined) { fields.push('voice_endpoint_path = ?'); values.push(a.voiceEndpointPath); }
+    if (a.voiceCost !== undefined) { fields.push('voice_cost = ?'); values.push(a.voiceCost); }
+    if (a.voiceBillingMode !== undefined) { fields.push('voice_billing_mode = ?'); values.push(a.voiceBillingMode); }
+    if (a.voiceBillingPrice !== undefined) { fields.push('voice_billing_price = ?'); values.push(a.voiceBillingPrice); }
+    if (a.voiceBillingUnit !== undefined) { fields.push('voice_billing_unit = ?'); values.push(a.voiceBillingUnit); }
+  }
+  if (updates.paymentProvider) {
+    const p = updates.paymentProvider;
+    if (p.enabled !== undefined) { fields.push('payment_enabled = ?'); values.push(p.enabled ? 1 : 0); }
+    if (p.provider !== undefined) { fields.push('payment_provider = ?'); values.push(p.provider); }
+    if (p.apiUrl !== undefined) { fields.push('payment_api_url = ?'); values.push(p.apiUrl); }
+    if (p.pid !== undefined) { fields.push('payment_pid = ?'); values.push(p.pid); }
+    if (p.key !== undefined) { fields.push('payment_key = ?'); values.push(p.key); }
+    if (p.notifyUrl !== undefined) { fields.push('payment_notify_url = ?'); values.push(p.notifyUrl); }
+    if (p.returnUrl !== undefined) { fields.push('payment_return_url = ?'); values.push(p.returnUrl); }
+    if (p.pointRate !== undefined) { fields.push('payment_point_rate = ?'); values.push(p.pointRate); }
+    if (p.minAmount !== undefined) { fields.push('payment_min_amount = ?'); values.push(p.minAmount); }
+    if (p.payTypes !== undefined) { fields.push('payment_pay_types = ?'); values.push(p.payTypes.join(',')); }
   }
   if (updates.pricing) {
     const p = updates.pricing as Partial<PricingConfig>;
@@ -2134,6 +2353,10 @@ export async function getChatModels(enabledOnly = false): Promise<ChatModel[]> {
     maxTokens: row.max_tokens,
     enabled: Boolean(row.enabled),
     costPerMessage: row.cost_per_message,
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
+    billingPrice: Number(row.billing_price) || Number(row.cost_per_message) || 1,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     createdAt: Number(row.created_at),
   }));
 }
@@ -2157,6 +2380,10 @@ export async function getChatModel(id: string): Promise<ChatModel | null> {
     maxTokens: row.max_tokens,
     enabled: Boolean(row.enabled),
     costPerMessage: row.cost_per_message,
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
+    billingPrice: Number(row.billing_price) || Number(row.cost_per_message) || 1,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     createdAt: Number(row.created_at),
   };
 }
@@ -2169,9 +2396,24 @@ export async function createChatModel(model: Omit<ChatModel, 'id' | 'createdAt'>
   const now = Date.now();
 
   await db.execute(
-    `INSERT INTO chat_models (id, name, api_url, api_key, model_id, supports_vision, max_tokens, enabled, cost_per_message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, model.name, model.apiUrl, model.apiKey, model.modelId, model.supportsVision, model.maxTokens, model.enabled, model.costPerMessage, now]
+    `INSERT INTO chat_models (id, name, api_url, api_key, model_id, supports_vision, max_tokens, enabled, cost_per_message, billing_mode, billing_price, billing_unit, image_url, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      model.name,
+      model.apiUrl,
+      model.apiKey,
+      model.modelId,
+      model.supportsVision,
+      model.maxTokens,
+      model.enabled,
+      model.costPerMessage,
+      model.billingMode || 'per_call',
+      model.billingPrice ?? model.costPerMessage,
+      model.billingUnit ?? 1,
+      model.imageUrl || '',
+      now,
+    ]
   );
 
   return { ...model, id, createdAt: now };
@@ -2192,6 +2434,10 @@ export async function updateChatModel(id: string, updates: Partial<Omit<ChatMode
   if (updates.maxTokens !== undefined) { fields.push('max_tokens = ?'); values.push(updates.maxTokens); }
   if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled); }
   if (updates.costPerMessage !== undefined) { fields.push('cost_per_message = ?'); values.push(updates.costPerMessage); }
+  if (updates.billingMode !== undefined) { fields.push('billing_mode = ?'); values.push(updates.billingMode); }
+  if (updates.billingPrice !== undefined) { fields.push('billing_price = ?'); values.push(updates.billingPrice); }
+  if (updates.billingUnit !== undefined) { fields.push('billing_unit = ?'); values.push(updates.billingUnit); }
+  if (updates.imageUrl !== undefined) { fields.push('image_url = ?'); values.push(updates.imageUrl); }
 
   if (fields.length === 0) return getChatModel(id);
 
@@ -2730,6 +2976,10 @@ CREATE TABLE IF NOT EXISTS image_models (
   highlight TINYINT(1) DEFAULT 0,
   enabled TINYINT(1) DEFAULT 1,
   cost_per_generation INT DEFAULT 10,
+  billing_mode VARCHAR(50) DEFAULT 'per_call',
+  billing_price INT DEFAULT 10,
+  billing_unit INT DEFAULT 1,
+  image_url TEXT,
   sort_order INT DEFAULT 0,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
@@ -2962,6 +3212,10 @@ export async function getImageModels(enabledOnly = false): Promise<ImageModel[]>
     highlight: Boolean(row.highlight),
     enabled: Boolean(row.enabled),
     costPerGeneration: row.cost_per_generation || 10,
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
+    billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -2999,6 +3253,10 @@ export async function getImageModelsByChannel(channelId: string, enabledOnly = f
     highlight: Boolean(row.highlight),
     enabled: Boolean(row.enabled),
     costPerGeneration: row.cost_per_generation || 10,
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
+    billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -3035,6 +3293,10 @@ export async function getImageModel(id: string): Promise<ImageModel | null> {
     highlight: Boolean(row.highlight),
     enabled: Boolean(row.enabled),
     costPerGeneration: row.cost_per_generation || 10,
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
+    billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -3058,8 +3320,8 @@ export async function createImageModel(
       features, aspect_ratios, resolutions, image_sizes,
       default_aspect_ratio, default_image_size,
       requires_reference_image, allow_empty_prompt, highlight,
-      enabled, cost_per_generation, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      enabled, cost_per_generation, billing_mode, billing_price, billing_unit, image_url, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       model.channelId,
@@ -3079,6 +3341,10 @@ export async function createImageModel(
       model.highlight ? 1 : 0,
       model.enabled ? 1 : 0,
       model.costPerGeneration,
+      model.billingMode || 'per_call',
+      model.billingPrice ?? model.costPerGeneration,
+      model.billingUnit ?? 1,
+      model.imageUrl || '',
       model.sortOrder,
       now,
       now,
@@ -3117,6 +3383,10 @@ export async function updateImageModel(
   if (updates.highlight !== undefined) { fields.push('highlight = ?'); values.push(updates.highlight ? 1 : 0); }
   if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
   if (updates.costPerGeneration !== undefined) { fields.push('cost_per_generation = ?'); values.push(updates.costPerGeneration); }
+  if (updates.billingMode !== undefined) { fields.push('billing_mode = ?'); values.push(updates.billingMode); }
+  if (updates.billingPrice !== undefined) { fields.push('billing_price = ?'); values.push(updates.billingPrice); }
+  if (updates.billingUnit !== undefined) { fields.push('billing_unit = ?'); values.push(updates.billingUnit); }
+  if (updates.imageUrl !== undefined) { fields.push('image_url = ?'); values.push(updates.imageUrl); }
   if (updates.sortOrder !== undefined) { fields.push('sort_order = ?'); values.push(updates.sortOrder); }
 
   values.push(id);
@@ -3166,6 +3436,10 @@ export async function getSafeImageModels(enabledOnly = false): Promise<SafeImage
         highlight: m.highlight,
         enabled: m.enabled,
         costPerGeneration: m.costPerGeneration,
+        billingMode: m.billingMode,
+        billingPrice: m.billingPrice,
+        billingUnit: m.billingUnit,
+        imageUrl: m.imageUrl,
       };
     });
 }
@@ -3246,6 +3520,10 @@ CREATE TABLE IF NOT EXISTS video_models (
   video_config_object TEXT,
   highlight TINYINT(1) DEFAULT 0,
   enabled TINYINT(1) DEFAULT 1,
+  billing_mode VARCHAR(50) DEFAULT 'per_second',
+  billing_price INT DEFAULT 12,
+  billing_unit INT DEFAULT 1,
+  image_url TEXT,
   sort_order INT DEFAULT 0,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
@@ -3476,6 +3754,31 @@ function parseVideoConfigObject(raw: unknown): VideoConfigObject | undefined {
   if (typeof candidate.preset === 'string' && candidate.preset.trim()) {
     output.preset = candidate.preset.trim().toLowerCase() as VideoConfigObject['preset'];
   }
+  if (typeof candidate.generation_mode === 'string' && candidate.generation_mode.trim()) {
+    output.generation_mode = candidate.generation_mode.trim();
+  }
+  if (typeof candidate.off_peak === 'boolean') {
+    output.off_peak = candidate.off_peak;
+  }
+  if (typeof candidate.quality_version === 'string' && candidate.quality_version.trim()) {
+    output.quality_version = candidate.quality_version.trim();
+  }
+  if (typeof candidate.model_version === 'string' && candidate.model_version.trim()) {
+    output.model_version = candidate.model_version.trim();
+  }
+  if (typeof candidate.version === 'string' && candidate.version.trim()) {
+    output.version = candidate.version.trim();
+  }
+  if (candidate.extra_params && typeof candidate.extra_params === 'object' && !Array.isArray(candidate.extra_params)) {
+    try {
+      const cloned = JSON.parse(JSON.stringify(candidate.extra_params)) as unknown;
+      if (cloned && typeof cloned === 'object' && !Array.isArray(cloned) && Object.keys(cloned).length > 0) {
+        output.extra_params = cloned as VideoConfigObject['extra_params'];
+      }
+    } catch {
+      // Ignore malformed nested extra params.
+    }
+  }
 
   return Object.keys(output).length > 0 ? output : undefined;
 }
@@ -3508,6 +3811,10 @@ export async function getVideoModels(enabledOnly = false): Promise<VideoModel[]>
     videoConfigObject: parseVideoConfigObject(row.video_config_object),
     highlight: Boolean(row.highlight),
     enabled: Boolean(row.enabled),
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
+    billingPrice: Number(row.billing_price) || 12,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -3541,6 +3848,10 @@ export async function getVideoModel(id: string): Promise<VideoModel | null> {
     videoConfigObject: parseVideoConfigObject(row.video_config_object),
     highlight: Boolean(row.highlight),
     enabled: Boolean(row.enabled),
+    billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
+    billingPrice: Number(row.billing_price) || 12,
+    billingUnit: Number(row.billing_unit) || 1,
+    imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -3563,8 +3874,8 @@ export async function createVideoModel(
       id, channel_id, name, description, api_model, base_url, api_key,
       features, aspect_ratios, durations,
       default_aspect_ratio, default_duration, video_config_object, highlight,
-      enabled, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      enabled, billing_mode, billing_price, billing_unit, image_url, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       model.channelId,
@@ -3581,6 +3892,10 @@ export async function createVideoModel(
       model.videoConfigObject ? JSON.stringify(model.videoConfigObject) : null,
       model.highlight ? 1 : 0,
       model.enabled ? 1 : 0,
+      model.billingMode || 'per_second',
+      model.billingPrice ?? 12,
+      model.billingUnit ?? 1,
+      model.imageUrl || '',
       model.sortOrder,
       now,
       now,
@@ -3620,6 +3935,10 @@ export async function updateVideoModel(
   }
   if (updates.highlight !== undefined) { fields.push('highlight = ?'); values.push(updates.highlight ? 1 : 0); }
   if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
+  if (updates.billingMode !== undefined) { fields.push('billing_mode = ?'); values.push(updates.billingMode); }
+  if (updates.billingPrice !== undefined) { fields.push('billing_price = ?'); values.push(updates.billingPrice); }
+  if (updates.billingUnit !== undefined) { fields.push('billing_unit = ?'); values.push(updates.billingUnit); }
+  if (updates.imageUrl !== undefined) { fields.push('image_url = ?'); values.push(updates.imageUrl); }
   if (updates.sortOrder !== undefined) { fields.push('sort_order = ?'); values.push(updates.sortOrder); }
 
   values.push(id);

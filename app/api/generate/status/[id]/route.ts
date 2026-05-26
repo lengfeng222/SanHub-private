@@ -5,12 +5,21 @@ import { getGeneration } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-function convertToMediaUrl(resultUrl: string | undefined, id: string, type: string): string {
-  if (!resultUrl) return '';
+function convertToMediaUrl(
+  resultUrl: string | undefined,
+  id: string,
+  type: string,
+  params?: Record<string, unknown>
+): string {
+  const hasVideoId = typeof params?.videoId === 'string' && params.videoId.trim().length > 0;
+  const upstreamResultUrl =
+    typeof params?.upstreamResultUrl === 'string' ? params.upstreamResultUrl.trim() : '';
 
-  if (type.includes('video')) {
+  if (type.includes('video') && (resultUrl || hasVideoId || upstreamResultUrl)) {
     return `/api/media/${id}`;
   }
+
+  if (!resultUrl) return '';
 
   if (resultUrl.includes('/v1/videos/') && resultUrl.includes('/content')) {
     return `/api/media/${id}`;
@@ -66,7 +75,7 @@ export async function GET(
         id: generation.id,
         status: generation.status,
         type: generation.type,
-        url: convertToMediaUrl(generation.resultUrl, generation.id, generation.type),
+        url: convertToMediaUrl(generation.resultUrl, generation.id, generation.type, generationParams),
         cost: generation.cost,
         progress: generationParams?.progress ?? 0,
         errorMessage: generation.errorMessage,

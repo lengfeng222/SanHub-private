@@ -20,6 +20,7 @@ import {
 } from '@/lib/v1-images';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed } from '@/lib/prompt-blocklist';
+import type { VideoConfigObject } from '@/types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
@@ -258,37 +259,55 @@ function extractPromptAndImages(messages: ChatMessage[]): { prompt: string; imag
   return { prompt: promptParts.join('\n').trim(), imageUrls };
 }
 
-function normalizeIncomingVideoConfigObject(payload: Record<string, unknown>):
-  | { aspect_ratio?: '16:9' | '9:16' | '1:1' | '2:3' | '3:2'; video_length?: number; resolution?: 'SD' | 'HD'; preset?: 'fun' | 'normal' | 'spicy' }
-  | undefined {
+function normalizeIncomingVideoConfigObject(payload: Record<string, unknown>): VideoConfigObject | undefined {
   const raw =
     (payload.videoConfigObject as Record<string, unknown> | undefined) ||
     (payload.video_config as Record<string, unknown> | undefined);
   if (!raw || typeof raw !== 'object') return undefined;
 
-  const output: {
-    aspect_ratio?: '16:9' | '9:16' | '1:1' | '2:3' | '3:2';
-    video_length?: number;
-    resolution?: 'SD' | 'HD';
-    preset?: 'fun' | 'normal' | 'spicy';
-  } = {};
+  const output: VideoConfigObject = {};
 
   if (typeof raw.aspect_ratio === 'string' && ['16:9', '9:16', '1:1', '2:3', '3:2'].includes(raw.aspect_ratio.trim())) {
-    output.aspect_ratio = raw.aspect_ratio.trim() as '16:9' | '9:16' | '1:1' | '2:3' | '3:2';
+    output.aspect_ratio = raw.aspect_ratio.trim() as VideoConfigObject['aspect_ratio'];
   }
   if (typeof raw.video_length === 'number' && Number.isFinite(raw.video_length)) {
-    output.video_length = Math.max(5, Math.min(30, Math.floor(raw.video_length)));
+    output.video_length = Math.max(1, Math.min(30, Math.floor(raw.video_length)));
   }
   if (typeof raw.resolution === 'string') {
     const resolution = raw.resolution.trim().toUpperCase();
-    if (resolution === 'SD' || resolution === 'HD') {
+    if (resolution) {
       output.resolution = resolution;
     }
   }
   if (typeof raw.preset === 'string') {
     const preset = raw.preset.trim().toLowerCase();
     if (preset === 'fun' || preset === 'normal' || preset === 'spicy') {
-      output.preset = preset;
+      output.preset = preset as VideoConfigObject['preset'];
+    }
+  }
+  if (typeof raw.generation_mode === 'string' && raw.generation_mode.trim()) {
+    output.generation_mode = raw.generation_mode.trim();
+  }
+  if (typeof raw.off_peak === 'boolean') {
+    output.off_peak = raw.off_peak;
+  }
+  if (typeof raw.quality_version === 'string' && raw.quality_version.trim()) {
+    output.quality_version = raw.quality_version.trim();
+  }
+  if (typeof raw.model_version === 'string' && raw.model_version.trim()) {
+    output.model_version = raw.model_version.trim();
+  }
+  if (typeof raw.version === 'string' && raw.version.trim()) {
+    output.version = raw.version.trim();
+  }
+  if (raw.extra_params && typeof raw.extra_params === 'object' && !Array.isArray(raw.extra_params)) {
+    try {
+      const cloned = JSON.parse(JSON.stringify(raw.extra_params)) as unknown;
+      if (cloned && typeof cloned === 'object' && !Array.isArray(cloned) && Object.keys(cloned).length > 0) {
+        output.extra_params = cloned as VideoConfigObject['extra_params'];
+      }
+    } catch {
+      // Ignore invalid extra params payload.
     }
   }
 
