@@ -18,6 +18,8 @@ import {
 import { calculateBillingCost, formatBillingSummary } from '@/lib/billing';
 import {
   buildTaskFromGeneration,
+  deleteGenerationRecord,
+  deleteGenerationRecords,
   fetchGenerationSubmit,
   fetchPendingGenerationTasks,
   fetchRecentUserGenerations,
@@ -690,6 +692,87 @@ function parseQuantityCount(value: string) {
   return Math.max(1, Number.parseInt(matched?.[1] || '1', 10) || 1);
 }
 
+type FloatingGenerateBarProps = {
+  costLabel: string;
+  buttonLabel: string;
+  loading?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  quantityValue?: string;
+  quantityOptions?: string[];
+  onQuantityChange?: (value: string) => void;
+  modelLabel?: string;
+  metaLabel?: string;
+};
+
+function FloatingGenerateBar({
+  costLabel,
+  buttonLabel,
+  loading = false,
+  disabled = false,
+  onClick,
+  quantityValue = '1 条',
+  quantityOptions,
+  onQuantityChange,
+  modelLabel,
+  metaLabel,
+}: FloatingGenerateBarProps) {
+  const options = quantityOptions && quantityOptions.length > 0 ? quantityOptions : [quantityValue];
+
+  return (
+    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+      <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">预计消耗</div>
+              <div className="mt-1 text-xl font-semibold text-white">{costLabel}</div>
+            </div>
+
+            <div className="hidden h-10 w-px bg-white/10 sm:block" />
+
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">生成数量</div>
+              <select
+                value={quantityValue}
+                onChange={(event) => onQuantityChange?.(event.target.value)}
+                disabled={!onQuantityChange}
+                className="mt-1 rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white outline-none disabled:cursor-default disabled:opacity-100"
+              >
+                {options.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {(modelLabel || metaLabel) ? <div className="hidden h-10 w-px bg-white/10 lg:block" /> : null}
+
+            {(modelLabel || metaLabel) ? (
+              <div className="hidden lg:block">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">当前模型</div>
+                <div className="mt-1 text-sm text-white/72">{modelLabel || '未选择'}</div>
+                {metaLabel ? <div className="mt-1 text-[11px] text-white/40">{metaLabel}</div> : null}
+              </div>
+            ) : null}
+          </div>
+
+          <button
+            type="button"
+            disabled={disabled || loading}
+            onClick={onClick}
+            className="inline-flex h-14 items-center justify-center gap-2 rounded-full bg-emerald-400 px-8 text-base font-semibold text-[#062a1b] shadow-[0_16px_40px_rgba(16,185,129,0.35)] transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            <Sparkles className={cn('h-4 w-4', loading ? 'animate-spin' : '')} />
+            {loading ? '正在提交任务...' : buttonLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function toVideoConfigAspectRatio(
   aspect?: {
     value?: string;
@@ -713,7 +796,34 @@ function filterImageModelsByVariant(variant: ImageVariant, models: SafeImageMode
   return filtered.length > 0 ? filtered : models;
 }
 
+function isGptLikeIdentifier(value?: string | null) {
+  return /gpt/i.test(String(value || ''));
+}
+
+function filterImageGenerationsByVariant(variant: ImageVariant, generations: Generation[]) {
+  const images = filterGenerationsByKind(generations, 'image');
+  return images.filter((generation) => {
+    const raw = `${generation.params?.modelId || ''} ${generation.params?.model || ''}`;
+    return variant === 'gptimage'
+      ? isGptLikeIdentifier(raw)
+      : !isGptLikeIdentifier(raw);
+  });
+}
+
+function filterImageTasksByVariant(variant: ImageVariant, tasks: Task[]) {
+  const images = tasks.filter((task) => !task.type?.includes('video'));
+  return images.filter((task) => {
+    const raw = `${task.modelId || ''} ${task.model || ''}`;
+    return variant === 'gptimage'
+      ? isGptLikeIdentifier(raw)
+      : !isGptLikeIdentifier(raw);
+  });
+}
+
 export function ImageToolPage({ variant }: { variant: ImageVariant }) {
+  const { update } = useSession();
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const refreshGenerationFeedRef = useRef<() => Promise<void>>(async () => {});
   const isGpt = variant === 'gptimage';
   const [prompt, setPrompt] = useState('');
   const [modelId, setModelId] = useState('');
@@ -721,6 +831,10 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   const [size, setSize] = useState('');
   const [quantity, setQuantity] = useState('1条');
   const [models, setModels] = useState<SafeImageModel[]>([]);
+  const [generations, setGenerations] = useState<Generation[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [busyGenerationId, setBusyGenerationId] = useState<string | null>(null);
+  const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -756,14 +870,290 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
     () => models.find((item) => item.id === modelId) || models[0],
     [modelId, models]
   );
-  const imageCostLabel = hasConfiguredModel && selectedModel
-    ? formatBillingSummary({
-        billingMode: selectedModel.billingMode,
-        billingPrice: selectedModel.billingPrice,
-        billingUnit: selectedModel.billingUnit,
-        legacyCost: selectedModel.costPerGeneration,
-      })
+  const imageGenerationCount = parseQuantityCount(quantity);
+  const imageEstimatedCost = useMemo(() => {
+    if (!hasConfiguredModel || !selectedModel) return null;
+    const perImageCost = calculateBillingCost({
+      billingMode: selectedModel.billingMode,
+      billingPrice: selectedModel.billingPrice,
+      billingUnit: selectedModel.billingUnit,
+      legacyCost: selectedModel.costPerGeneration,
+    });
+    return perImageCost * imageGenerationCount;
+  }, [hasConfiguredModel, imageGenerationCount, selectedModel]);
+  const imageCostLabel = hasConfiguredModel
+    ? `${imageEstimatedCost ?? 0} 积分`
     : '请先选择模型';
+  const imageAspectLabel = aspect || selectedModel?.defaultAspectRatio || (isGpt ? '1:1' : '9:16');
+  const imageSizeLabel = size || selectedModel?.defaultImageSize || (isGpt ? '1K' : '2K');
+
+  const loadRecentGenerations = useCallback(async () => {
+    try {
+      const recent = await fetchRecentUserGenerations(24);
+      const imageGenerations = filterImageGenerationsByVariant(variant, recent);
+      const completedImageGenerations = imageGenerations.filter(
+        (generation) =>
+          generation.status === 'completed' && isTerminalGenerationStatus(generation.status)
+      );
+      const failedImageTasks = imageGenerations
+        .filter((generation) => isFailedGenerationStatus(generation.status))
+        .map(
+          (generation) =>
+            ({
+              ...buildTaskFromGeneration(generation),
+              persisted: true,
+            }) satisfies Task
+        );
+
+      setGenerations((prev) => mergeGenerationsById(prev, completedImageGenerations));
+      if (failedImageTasks.length > 0) {
+        setTasks((prev) => mergeTasksById(prev, failedImageTasks));
+      }
+    } catch (loadError) {
+      console.error('[ImageToolPage] 加载最近作品失败:', loadError);
+    }
+  }, [variant]);
+
+  const markTaskAsFailed = useCallback((taskId: string, errorMessage: string, persisted = true) => {
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: 'failed',
+              errorMessage,
+              persisted,
+            }
+          : task
+      )
+    );
+  }, []);
+
+  const pollTaskStatus = useCallback(
+    async (taskId: string, taskPrompt: string) => {
+      if (abortControllersRef.current.has(taskId)) return;
+
+      const controller = new AbortController();
+      let shouldResyncAfterPoll = false;
+      abortControllersRef.current.set(taskId, controller);
+
+      try {
+        await pollGenerationTask({
+          taskId,
+          taskPrompt,
+          taskType: 'image',
+          signal: controller.signal,
+          onProgress: (payload) => {
+            const nextStatus = payload.status === 'processing' ? 'processing' : 'pending';
+            setTasks((prev) =>
+              prev.map((task) =>
+                task.id === taskId
+                  ? {
+                      ...task,
+                      status: nextStatus,
+                      progress:
+                        typeof payload.progress === 'number' ? payload.progress : task.progress,
+                      model:
+                        (typeof payload.params?.model === 'string' && payload.params.model) ||
+                        task.model,
+                      modelId:
+                        (typeof payload.params?.modelId === 'string' && payload.params.modelId) ||
+                        task.modelId,
+                      upstreamTaskId:
+                        (typeof payload.params?.upstreamTaskId === 'string' &&
+                          payload.params.upstreamTaskId) ||
+                        task.upstreamTaskId,
+                      upstreamStatus:
+                        (typeof payload.params?.upstreamStatus === 'string' &&
+                          payload.params.upstreamStatus) ||
+                        task.upstreamStatus,
+                      upstreamState:
+                        (typeof payload.params?.upstreamState === 'string' &&
+                          payload.params.upstreamState) ||
+                        task.upstreamState,
+                      upstreamStatusGroup:
+                        (typeof payload.params?.upstreamStatusGroup === 'string' &&
+                          payload.params.upstreamStatusGroup) ||
+                        task.upstreamStatusGroup,
+                      upstreamProgress:
+                        typeof payload.params?.upstreamProgress === 'number'
+                          ? payload.params.upstreamProgress
+                          : task.upstreamProgress,
+                      upstreamUpdatedAt:
+                        typeof payload.params?.upstreamUpdatedAt === 'number'
+                          ? payload.params.upstreamUpdatedAt
+                          : task.upstreamUpdatedAt,
+                      persisted: true,
+                    }
+                  : task
+              )
+            );
+          },
+          onCompleted: async (generation) => {
+            await update();
+            setTasks((prev) => prev.filter((task) => task.id !== taskId));
+            setGenerations((prev) => mergeGenerationsById(prev, [generation]));
+            await loadRecentGenerations();
+          },
+          onFailed: async (errorMessage, payload) => {
+            if (!payload) {
+              markTaskAsFailed(taskId, errorMessage, false);
+              shouldResyncAfterPoll = true;
+              return;
+            }
+
+            markTaskAsFailed(taskId, errorMessage, true);
+          },
+          onTimeout: async () => {
+            markTaskAsFailed(taskId, '任务查询超时，请稍后刷新或到作品库查看最终状态', false);
+            shouldResyncAfterPoll = true;
+          },
+        });
+      } finally {
+        abortControllersRef.current.delete(taskId);
+        if (shouldResyncAfterPoll) {
+          await refreshGenerationFeedRef.current();
+        }
+      }
+    },
+    [loadRecentGenerations, markTaskAsFailed, update]
+  );
+
+  const loadPendingTasks = useCallback(async () => {
+    try {
+      const imageTasks = filterImageTasksByVariant(
+        variant,
+        filterTasksByKind(await fetchPendingGenerationTasks(50), 'image').map(
+          (task) =>
+            ({
+              ...task,
+              status: task.status === 'processing' ? 'processing' : 'pending',
+              progress: typeof task.progress === 'number' ? task.progress : 0,
+              persisted: true,
+            }) satisfies Task
+        )
+      );
+
+      setTasks((prev) => {
+        const preservedActiveTasks = prev.filter(
+          (task) =>
+            (task.status === 'pending' || task.status === 'processing') &&
+            !imageTasks.some((incoming) => incoming.id === task.id) &&
+            (task.persisted === false || imageTasks.length === 0)
+        );
+
+        const next = replaceActiveTasks(prev, imageTasks);
+        return preservedActiveTasks.length > 0
+          ? mergeTasksById(next, preservedActiveTasks)
+          : next;
+      });
+
+      imageTasks.forEach((task) => {
+        void pollTaskStatus(task.id, task.prompt);
+      });
+    } catch (loadError) {
+      console.error('[ImageToolPage] 加载进行中任务失败:', loadError);
+    }
+  }, [pollTaskStatus, variant]);
+
+  const refreshGenerationFeed = useCallback(async () => {
+    await Promise.allSettled([loadRecentGenerations(), loadPendingTasks()]);
+  }, [loadPendingTasks, loadRecentGenerations]);
+
+  useEffect(() => {
+    refreshGenerationFeedRef.current = refreshGenerationFeed;
+  }, [refreshGenerationFeed]);
+
+  useEffect(() => {
+    void refreshGenerationFeed();
+
+    const handleWindowFocus = () => {
+      void refreshGenerationFeed();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshGenerationFeed();
+      }
+    };
+    const intervalId = window.setInterval(() => {
+      void refreshGenerationFeed();
+    }, 15000);
+
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      const controllers = abortControllersRef.current;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+    };
+  }, [refreshGenerationFeed]);
+
+  const handleRemoveTask = useCallback(async (taskId: string) => {
+    const controller = abortControllersRef.current.get(taskId);
+    if (controller) {
+      controller.abort();
+      abortControllersRef.current.delete(taskId);
+    }
+
+    try {
+      await fetch(`/api/user/tasks/${taskId}`, { method: 'DELETE' });
+    } catch (cancelError) {
+      console.error('[ImageToolPage] 取消任务失败:', cancelError);
+    }
+
+    setTasks((prev) => prev.filter((task) => task.id !== taskId));
+  }, []);
+
+  const handleRemoveGeneration = useCallback(
+    async (generation: Generation) => {
+      if (busyGenerationId) return;
+
+      const confirmed = window.confirm('确认删除这条已生成记录吗？删除后将无法在当前站点继续访问该作品。');
+      if (!confirmed) return;
+
+      setBusyGenerationId(generation.id);
+      setGenerations((prev) => prev.filter((item) => item.id !== generation.id));
+
+      try {
+        await deleteGenerationRecord(generation.id);
+      } catch (deleteError) {
+        console.error('[ImageToolPage] 删除作品失败:', deleteError);
+        setGenerations((prev) => mergeGenerationsById(prev, [generation]));
+      } finally {
+        setBusyGenerationId(null);
+      }
+    },
+    [busyGenerationId]
+  );
+
+  const handleClearFailedTasks = useCallback(async () => {
+    if (clearingFailedTasks) return;
+
+    const failedTasks = tasks.filter((task) => isFailedGenerationStatus(task.status));
+    if (failedTasks.length === 0) return;
+
+    const confirmed = window.confirm('确认清理当前生成页的错误记录吗？');
+    if (!confirmed) return;
+
+    const failedTaskIds = failedTasks
+      .filter((task) => task.persisted !== false)
+      .map((task) => task.id);
+    setClearingFailedTasks(true);
+    setTasks((prev) => prev.filter((task) => !isFailedGenerationStatus(task.status)));
+
+    try {
+      await deleteGenerationRecords(failedTaskIds);
+    } catch (deleteError) {
+      console.error('[ImageToolPage] 清理错误任务失败:', deleteError);
+      setTasks((prev) => mergeTasksById(prev, failedTasks));
+    } finally {
+      setClearingFailedTasks(false);
+    }
+  }, [clearingFailedTasks, tasks]);
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
@@ -774,13 +1164,59 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
     setLoading(true);
     setError('');
     try {
-      const res = await fetchGenerationSubmit('/api/generate/image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId, prompt, aspectRatio: aspect || undefined, imageSize: size || undefined }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '生成失败');
+      const taskPrompt = prompt.trim();
+      const taskCount = parseQuantityCount(quantity);
+      const results = await Promise.allSettled(
+        Array.from({ length: taskCount }, async () => {
+          const res = await fetchGenerationSubmit('/api/generate/image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              modelId,
+              prompt: taskPrompt,
+              aspectRatio: aspect || undefined,
+              imageSize: size || undefined,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || '生成失败');
+
+          const newTask: Task = {
+            id: data.data.id,
+            prompt: taskPrompt,
+            model: selectedModel?.name || selectedModel?.apiModel || '图像生成',
+            modelId,
+            type: data.data.type || 'gemini-image',
+            status: 'pending',
+            progress: 0,
+            createdAt: Date.now(),
+            persisted: false,
+          };
+
+          setTasks((prev) => mergeTasksById([newTask], prev));
+          void pollTaskStatus(data.data.id, taskPrompt);
+          return data.data.id as string;
+        })
+      );
+      const failed = results.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected'
+      );
+      const successCount = results.filter((result) => result.status === 'fulfilled').length;
+
+      if (successCount === 0) {
+        throw new Error(
+          failed?.reason instanceof Error ? failed.reason.message : '生成失败'
+        );
+      }
+
+      await update();
+      if (failed) {
+        setError(
+          failed.reason instanceof Error
+            ? `已提交 ${successCount} 个任务，部分失败：${failed.reason.message}`
+            : `已提交 ${successCount} 个任务，部分提交失败`
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成失败');
     } finally {
@@ -789,9 +1225,19 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-36">
       <LcPageTitle title={title} />
-      <LcResultPanel />
+      <section className="overflow-hidden rounded-[26px] border border-white/10 bg-[#10141c]/90 shadow-[0_20px_60px_rgba(0,0,0,0.24)]">
+        <ResultGallery
+          generations={generations}
+          tasks={tasks}
+          onRemoveTask={handleRemoveTask}
+          onClearFailedTasks={handleClearFailedTasks}
+          onRemoveGeneration={handleRemoveGeneration}
+          busyGenerationId={busyGenerationId}
+          clearingFailedTasks={clearingFailedTasks}
+        />
+      </section>
       <LcCard>
         <div className="space-y-5 p-5">
           <LcUploadBox label="上传图片" sublabel="单张建议不要超过 15MB" />
@@ -836,18 +1282,21 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
             </div>
           ) : null}
           {error ? <p className="text-sm text-red-300">{error}</p> : null}
-          <LcCostBar
-            cost={imageCostLabel}
-            buttonLabel="立即生成"
-            loading={loading}
-            disabled={!prompt.trim() || !hasConfiguredModel}
-            onClick={handleGenerate}
-            quantityValue={quantity}
-            quantityOptions={['1条', '2条', '3条', '4条']}
-            onQuantityChange={setQuantity}
-          />
         </div>
       </LcCard>
+
+      <FloatingGenerateBar
+        costLabel={imageCostLabel}
+        buttonLabel="开始生成"
+        loading={loading}
+        disabled={!prompt.trim() || !hasConfiguredModel}
+        onClick={handleGenerate}
+        quantityValue={quantity}
+        quantityOptions={['1条', '2条', '3条', '4条']}
+        onQuantityChange={setQuantity}
+        modelLabel={selectedModel?.name || '未选择'}
+        metaLabel={`${imageAspectLabel} · ${imageSizeLabel} · ${imageGenerationCount} 条`}
+      />
     </div>
   );
 }
@@ -1904,7 +2353,7 @@ export function TtsPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-36">
       <LcPageTitle title="TTS语音" description="创建声音、TTS语音克隆、音色替换" />
       <LcResultPanel emptyTitle={audioUrl ? '已生成语音' : '暂无生成结果'} emptyDescription={audioUrl ? '可在下方播放或下载' : '开始创作你的第一个语音作品'} />
       {audioUrl ? <audio controls src={audioUrl} className="w-full" /> : null}
@@ -1926,9 +2375,18 @@ export function TtsPage() {
             <LcTextarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="请输入需要生成语音的内容" className="min-h-[180px]" />
           </LcSection>
           {error ? <p className="text-sm text-red-300">{error}</p> : null}
-          <LcCostBar cost="5 积分 / 次" buttonLabel="开始生成" loading={loading} disabled={!prompt.trim()} onClick={handleGenerate} hint={`${prompt.length}/100字 · 当前${prompt.length}字`} />
         </div>
       </LcCard>
+
+      <FloatingGenerateBar
+        costLabel="5 积分"
+        buttonLabel="开始生成"
+        loading={loading}
+        disabled={!prompt.trim()}
+        onClick={handleGenerate}
+        modelLabel="TTS 语音"
+        metaLabel={`${voicePrompt.trim() ? '自定义音色' : '默认音色'} · MP3 · 1 条`}
+      />
     </div>
   );
 }
@@ -1964,7 +2422,7 @@ export function MusicPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-36">
       <LcPageTitle title="AI音乐" />
       <LcCard>
         <div className="space-y-5 p-5">
@@ -2017,7 +2475,6 @@ export function MusicPage() {
             </div>
           ) : null}
           {error ? <p className="text-sm text-red-300">{error}</p> : null}
-          <LcCostBar cost="10" buttonLabel="开始生成" loading={loading} disabled={!stylePrompt.trim() && !lyrics.trim()} onClick={handleGenerate} />
         </div>
       </LcCard>
       <LcCard>
@@ -2035,6 +2492,16 @@ export function MusicPage() {
           </div>
         </div>
       </LcCard>
+
+      <FloatingGenerateBar
+        costLabel="10 积分"
+        buttonLabel="开始生成"
+        loading={loading}
+        disabled={!stylePrompt.trim() && !lyrics.trim()}
+        onClick={handleGenerate}
+        modelLabel={model}
+        metaLabel={`${duration} · ${customMode ? '自定义歌词' : '自动歌词'} · 1 条`}
+      />
     </div>
   );
 }

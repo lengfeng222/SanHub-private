@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Loader2, Mic } from 'lucide-react';
+import { Loader2, Mic, Sparkles } from 'lucide-react';
 
 const KIND: 'music' | 'voice' = 'voice';
 const VOICE_MODELS = ['豆包 语音合成 2.0', 'Gemini-3.1-TTS'];
@@ -19,8 +19,7 @@ export default function AudioPage() {
   const [error, setError] = useState('');
   const [resultUrl, setResultUrl] = useState('');
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
+  const handleGenerate = async () => {
     setError('');
     setResultUrl('');
 
@@ -52,7 +51,7 @@ export default function AudioPage() {
   };
 
   return (
-    <div className="mx-auto grid w-full max-w-6xl gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+    <div className="mx-auto grid w-full max-w-6xl gap-6 pb-36 xl:grid-cols-[minmax(0,1fr)_420px]">
       <section className="surface p-6 md:p-8">
         <div className="mb-8 flex items-center gap-4">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.07] bg-[#0b0f14]">
@@ -64,7 +63,13 @@ export default function AudioPage() {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleGenerate();
+          }}
+          className="space-y-5"
+        >
           <div className="space-y-2">
             <label className="text-xs text-foreground/45">模型 ID（可选，留空使用环境变量默认模型）</label>
             <input
@@ -130,15 +135,6 @@ export default function AudioPage() {
               {error}
             </div>
           )}
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="inline-flex h-12 items-center justify-center gap-3 rounded-full bg-foreground px-8 font-medium text-background transition-all hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {loading ? '生成中...' : `生成${title}`}
-          </button>
         </form>
       </section>
 
@@ -166,6 +162,46 @@ export default function AudioPage() {
           </div>
         )}
       </aside>
+
+      <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+        <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">预计消耗</div>
+                <div className="mt-1 text-xl font-semibold text-white">5 积分</div>
+              </div>
+
+              <div className="hidden h-10 w-px bg-white/10 sm:block" />
+
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">生成数量</div>
+                <div className="mt-1 rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white">
+                  1 条
+                </div>
+              </div>
+
+              <div className="hidden h-10 w-px bg-white/10 lg:block" />
+
+              <div className="hidden lg:block">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">当前模型</div>
+                <div className="mt-1 text-sm text-white/72">{model || '后台默认模型'}</div>
+                <div className="mt-1 text-[11px] text-white/40">{voice || '默认音色'} · {format.toUpperCase()} · 1 条</div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleGenerate()}
+              disabled={loading}
+              className="inline-flex h-14 items-center justify-center gap-2 rounded-full bg-emerald-400 px-8 text-base font-semibold text-[#062a1b] shadow-[0_16px_40px_rgba(16,185,129,0.35)] transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              {loading ? '正在提交任务...' : `生成${title}`}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

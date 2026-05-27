@@ -13,6 +13,7 @@ import {
   Image as ImageIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { calculateBillingCost } from '@/lib/billing';
 import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
 import type { Generation, SafeImageModel, DailyLimitConfig } from '@/types';
 import { toast } from '@/components/ui/toaster';
@@ -64,6 +65,11 @@ export interface ImageGenerationPageProps {
   onReuseGeneration?: (generation: Generation, target: 'image' | 'video') => void;
   onGenerationDeleted?: (generationId: string) => void;
   isActive?: boolean;
+}
+
+function parseQuantityCount(value: string) {
+  const matched = String(value).match(/\d+/);
+  return Math.max(1, Number.parseInt(matched?.[0] || '1', 10) || 1);
 }
 
 function getImageResolution(
@@ -134,6 +140,7 @@ export function ImageGenerationPage({
   const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
   const [error, setError] = useState('');
   const [keepPrompt, setKeepPrompt] = useState(false);
+  const [quantity, setQuantity] = useState('1 条');
 
   const clearImages = useCallback(() => {
     setImages((prev) => {
@@ -146,6 +153,17 @@ export function ImageGenerationPage({
   const currentModel = useMemo(() => {
     return availableModels.find((model) => model.id === selectedModelId) || availableModels[0];
   }, [availableModels, selectedModelId]);
+  const quantityCount = useMemo(() => parseQuantityCount(quantity), [quantity]);
+  const estimatedCost = useMemo(() => {
+    if (!currentModel) return 0;
+    const perImageCost = calculateBillingCost({
+      billingMode: currentModel.billingMode,
+      billingPrice: currentModel.billingPrice,
+      billingUnit: currentModel.billingUnit,
+      legacyCost: currentModel.costPerGeneration,
+    });
+    return perImageCost * quantityCount;
+  }, [currentModel, quantityCount]);
 
   const hasReferenceInput = images.length > 0 || Boolean(externalReference);
 
@@ -702,14 +720,44 @@ export function ImageGenerationPage({
 
     try {
       const compressedImages = await compressImagesIfNeeded();
-      await submitSingleTask(taskPrompt, compressedImages, createClientRequestId());
+      const requestCount = parseQuantityCount(quantity);
+      const batchRequestId = createClientRequestId();
+      const results = await Promise.allSettled(
+        Array.from({ length: requestCount }, (_, index) =>
+          submitSingleTask(
+            taskPrompt,
+            compressedImages,
+            requestCount === 1 ? batchRequestId : `${batchRequestId}-${index}`
+          )
+        )
+      );
+      const successfulCount = results.filter((result) => result.status === 'fulfilled').length;
+      const failedResult = results.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected'
+      );
+
+      if (successfulCount === 0) {
+        throw new Error(failedResult ? getSubmissionFailureMessage(failedResult) : '生成失败');
+      }
 
       toast({
-        title: '任务已提交',
-        description: '任务已加入队列，可继续提交新任务',
+        title:
+          successfulCount === requestCount
+            ? `已提交 ${successfulCount} 个任务`
+            : `已提交 ${successfulCount} / ${requestCount} 个任务`,
+        description:
+          successfulCount === requestCount
+            ? '任务已加入队列，可继续提交新任务'
+            : failedResult
+              ? getSubmissionFailureMessage(failedResult)
+              : '部分任务提交失败，请稍后重试',
       });
 
-      setDailyUsage((prev) => ({ ...prev, imageCount: prev.imageCount + 1 }));
+      setDailyUsage((prev) => ({ ...prev, imageCount: prev.imageCount + successfulCount }));
+
+      if (failedResult) {
+        setError(`已提交 ${successfulCount} 个任务，部分提交失败：${getSubmissionFailureMessage(failedResult)}`);
+      }
 
       if (!keepPrompt) {
         setPrompt('');
@@ -785,12 +833,15 @@ export function ImageGenerationPage({
     if (!currentModel) return '';
     return getImageResolution(currentModel, aspectRatio, imageSize);
   };
+  const modelMetaLabel = `${aspectRatio || currentModel?.defaultAspectRatio || '1:1'} · ${currentModel?.features.imageSize ? (imageSize || currentModel.defaultImageSize || '默认尺寸') : (getCurrentResolutionDisplay() || '默认尺寸')} · ${quantityCount} 条`;
 
   return (
     <div
       className={cn(
         'flex w-full flex-col',
         embedded ? 'h-full min-h-0' : 'max-w-7xl mx-auto lg:h-[calc(100vh-100px)]'
+          ,
+        !embedded && 'pb-36'
       )}
     >
       {!embedded && (
@@ -1005,28 +1056,30 @@ export function ImageGenerationPage({
               </button>
             )}
 
-            <button
-              onClick={handleGenerate}
-              disabled={submitting || compressing}
-              className={cn(
-                'flex items-center gap-2 px-5 py-2 rounded-lg font-medium text-sm transition-all',
-                submitting || compressing
-                  ? 'bg-card/60 text-foreground/40 cursor-not-allowed'
-                  : 'bg-gradient-to-r from-sky-500 to-emerald-500 text-white hover:opacity-90'
-              )}
-            >
-              {submitting || compressing ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{compressing ? '处理图片中...' : '提交中...'}</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-4 h-4" />
-                  <span>立即生成</span>
-                </>
-              )}
-            </button>
+            {embedded ? (
+              <button
+                onClick={handleGenerate}
+                disabled={submitting || compressing}
+                className={cn(
+                  'flex items-center gap-2 px-5 py-2 rounded-lg font-medium text-sm transition-all',
+                  submitting || compressing
+                    ? 'bg-card/60 text-foreground/40 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-sky-500 to-emerald-500 text-white hover:opacity-90'
+                )}
+              >
+                {submitting || compressing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>{compressing ? '处理图片中...' : '提交中...'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    <span>立即生成</span>
+                  </>
+                )}
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1043,6 +1096,62 @@ export function ImageGenerationPage({
           clearingFailedTasks={clearingFailedTasks}
         />
       </div>
+
+      {!embedded ? (
+        <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+          <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">预计消耗</div>
+                  <div className="mt-1 text-xl font-semibold text-white">
+                    {currentModel ? `${estimatedCost} 积分` : '请先选择模型'}
+                  </div>
+                </div>
+
+                <div className="hidden h-10 w-px bg-white/10 sm:block" />
+
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">生成数量</div>
+                  <select
+                    value={quantity}
+                    onChange={(event) => setQuantity(event.target.value)}
+                    className="mt-1 rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white outline-none"
+                  >
+                    {['1 条', '2 条', '3 条', '4 条'].map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="hidden h-10 w-px bg-white/10 lg:block" />
+
+                <div className="hidden lg:block">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-white/32">当前模型</div>
+                  <div className="mt-1 text-sm text-white/72">{currentModel?.name || '未选择'}</div>
+                  <div className="mt-1 text-[11px] text-white/40">{modelMetaLabel}</div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleGenerate}
+                disabled={submitting || compressing || availableModels.length === 0 || isImageLimitReached}
+                className="inline-flex h-14 items-center justify-center gap-2 rounded-full bg-emerald-400 px-8 text-base font-semibold text-[#062a1b] shadow-[0_16px_40px_rgba(16,185,129,0.35)] transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {submitting || compressing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                {compressing ? '处理图片中...' : submitting ? '正在提交任务...' : '开始生成'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
