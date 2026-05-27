@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:standalone": "bash ./scripts/start-standalone.sh",
     "lint": "next lint"
   },
   "dependencies": {
