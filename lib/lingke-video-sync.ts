@@ -623,13 +623,34 @@ export async function fetchLingkeSyncedVideoModelsForChannel(options: {
   if (options.baseUrl && options.apiKey) {
     const remoteModels = await fetchLingkeRemoteVideoModels(options.baseUrl, options.apiKey);
     if (remoteModels.length > 0) {
-      return remoteModels
+      const syncedRemoteModels = remoteModels
         .map((remote) => {
           const imageUrl = getLingkeVideoAliases(remote.display_name, remote.name)
             .map((alias) => visibleImageMap.get(alias.toLowerCase()))
             .find(Boolean);
           return mergeRemoteModel(remote, imageUrl);
+        });
+
+      const coveredVisibleAliases = new Set(
+        syncedRemoteModels.flatMap((model) =>
+          getLingkeVideoAliases(model.apiModel, model.name, ...(model.matchKeys || []))
+            .map((alias) => alias.toLowerCase())
+        )
+      );
+
+      const visibleOnlyModels = visibleItems
+        .filter((item) => {
+          const aliases = getLingkeVideoAliases(normalizeName(item.展示名称));
+          return aliases.some((alias) => !coveredVisibleAliases.has(alias.toLowerCase()));
         })
+        .map((item) =>
+          createLingkeSyncedVideoModelFromName(
+            normalizeName(item.展示名称),
+            normalizeName(item.模型图标) || undefined,
+          )
+        );
+
+      return [...syncedRemoteModels, ...visibleOnlyModels]
         .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
     }
   }

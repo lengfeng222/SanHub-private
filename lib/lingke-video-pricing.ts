@@ -1854,15 +1854,23 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
 
 function isVideoModelName(name: string): boolean {
   const normalized = normalizeName(name).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (
+    /(tts|music generation|suno|gpt image|image\b|iamge\b|gemini\b|qwen\b|deepseek\b|reasoning\b|opus\b|doubao tts|minimax-m2\.7)/i.test(normalized)
+  ) {
+    return false;
+  }
   if (
     normalized === '可灵-v3'
     || normalized === 'kling-v3'
     || normalized === '可灵-v3-omni'
     || normalized === 'kling-v3-omni'
   ) {
-    return false;
+    return true;
   }
-  return /(视频|video|first frame|first\/last|reference|extension|motion control|omni-flash|veo3\.1-lite|vidu q3|happyhorse|wanxiang|kling|pix|sora|grok|即梦|sd 2\.0)/i.test(name);
+  return /(视频|video|first frame|first\/last|reference|extension|motion control|omni-flash|veo3\.1(?:-4khd|-4k高清|-lite)?|vidu q[23]|happyhorse|wanxiang|kling|pix|sora|grok|hailuo|seedance|sd 2\.0)/i.test(name);
 }
 
 export async function fetchLingkeVisibleVideoModels(): Promise<LingkeRemoteVisibleModel[]> {
