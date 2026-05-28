@@ -1042,144 +1042,164 @@ export default function SiteConfigPage() {
           />
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
-            <Coins className="h-4 w-4 text-yellow-400" />
-            <input
-              type="number"
-              min="0"
-              value={config.audioProvider.musicCost}
-              onChange={(event) =>
-                patch((prev) => ({
-                  ...prev,
-                  audioProvider: { ...prev.audioProvider, musicCost: Math.max(0, Number(event.target.value) || 0) },
-                }))
-              }
-              className="w-full bg-transparent text-foreground focus:outline-none"
-            />
-            <span className="text-sm text-foreground/50">音乐消耗积分</span>
-          </div>
-          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-3">
-            <Coins className="h-4 w-4 text-yellow-400" />
-            <input
-              type="number"
-              min="0"
-              value={config.audioProvider.voiceCost}
-              onChange={(event) =>
-                patch((prev) => ({
-                  ...prev,
-                  audioProvider: { ...prev.audioProvider, voiceCost: Math.max(0, Number(event.target.value) || 0) },
-                }))
-              }
-              className="w-full bg-transparent text-foreground focus:outline-none"
-            />
-            <span className="text-sm text-foreground/50">TTS 消耗积分</span>
-          </div>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-3 rounded-lg border border-border/70 bg-card/60 p-4">
-            <p className="text-sm text-foreground">音乐计费规则</p>
-            <p className="text-xs text-foreground/40">
-              当前：{formatBillingSummary({
-                billingMode: config.audioProvider.musicBillingMode,
-                billingPrice: config.audioProvider.musicBillingPrice,
-                billingUnit: config.audioProvider.musicBillingUnit,
-                legacyCost: config.audioProvider.musicCost,
-              })}
-            </p>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <select
-                value={config.audioProvider.musicBillingMode || 'per_call'}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, musicBillingMode: event.target.value as 'per_call' | 'per_second' },
-                  }))
-                }
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              >
-                {AUDIO_BILLING_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
-                ))}
-              </select>
-              <input
-                type="number"
-                min="0"
-                value={config.audioProvider.musicBillingPrice || 0}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, musicBillingPrice: Math.max(0, Number(event.target.value) || 0) },
-                  }))
-                }
-                placeholder="价格"
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              />
-              <input
-                type="number"
-                min="1"
-                value={config.audioProvider.musicBillingUnit || 1}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, musicBillingUnit: Math.max(1, Number(event.target.value) || 1) },
-                  }))
-                }
-                placeholder="单位"
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              />
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-4">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-medium text-foreground">音乐定价</p>
+                <p className="text-xs text-foreground/45">简洁设置：选计费方式、填价格和单位即可。</p>
+              </div>
+              <div className="rounded-full border border-emerald-400/20 bg-card/70 px-4 py-2 text-sm text-emerald-300">
+                当前：{formatBillingSummary({
+                  billingMode: config.audioProvider.musicBillingMode,
+                  billingPrice: config.audioProvider.musicBillingPrice,
+                  billingUnit: config.audioProvider.musicBillingUnit,
+                  legacyCost: config.audioProvider.musicCost,
+                })}
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">兼容旧积分</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={config.audioProvider.musicCost}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, musicCost: Math.max(0, Number(event.target.value) || 0) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">计费方式</label>
+                <select
+                  value={config.audioProvider.musicBillingMode || 'per_call'}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, musicBillingMode: event.target.value as 'per_call' | 'per_second' },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                >
+                  {AUDIO_BILLING_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">价格</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={config.audioProvider.musicBillingPrice || 0}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, musicBillingPrice: Math.max(0, Number(event.target.value) || 0) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">{(config.audioProvider.musicBillingMode || 'per_call') === 'per_second' ? '每多少秒' : '每多少次'}</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.audioProvider.musicBillingUnit || 1}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, musicBillingUnit: Math.max(1, Number(event.target.value) || 1) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
             </div>
           </div>
-          <div className="space-y-3 rounded-lg border border-border/70 bg-card/60 p-4">
-            <p className="text-sm text-foreground">语音计费规则</p>
-            <p className="text-xs text-foreground/40">
-              当前：{formatBillingSummary({
-                billingMode: config.audioProvider.voiceBillingMode,
-                billingPrice: config.audioProvider.voiceBillingPrice,
-                billingUnit: config.audioProvider.voiceBillingUnit,
-                legacyCost: config.audioProvider.voiceCost,
-              })}
-            </p>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <select
-                value={config.audioProvider.voiceBillingMode || 'per_call'}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, voiceBillingMode: event.target.value as 'per_call' | 'per_second' },
-                  }))
-                }
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              >
-                {AUDIO_BILLING_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
-                ))}
-              </select>
-              <input
-                type="number"
-                min="0"
-                value={config.audioProvider.voiceBillingPrice || 0}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, voiceBillingPrice: Math.max(0, Number(event.target.value) || 0) },
-                  }))
-                }
-                placeholder="价格"
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              />
-              <input
-                type="number"
-                min="1"
-                value={config.audioProvider.voiceBillingUnit || 1}
-                onChange={(event) =>
-                  patch((prev) => ({
-                    ...prev,
-                    audioProvider: { ...prev.audioProvider, voiceBillingUnit: Math.max(1, Number(event.target.value) || 1) },
-                  }))
-                }
-                placeholder="单位"
-                className="rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-              />
+          <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 space-y-4">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-medium text-foreground">语音 / 配音定价</p>
+                <p className="text-xs text-foreground/45">和音乐保持一致，直接设置按次或按秒。</p>
+              </div>
+              <div className="rounded-full border border-sky-400/20 bg-card/70 px-4 py-2 text-sm text-sky-300">
+                当前：{formatBillingSummary({
+                  billingMode: config.audioProvider.voiceBillingMode,
+                  billingPrice: config.audioProvider.voiceBillingPrice,
+                  billingUnit: config.audioProvider.voiceBillingUnit,
+                  legacyCost: config.audioProvider.voiceCost,
+                })}
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">兼容旧积分</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={config.audioProvider.voiceCost}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, voiceCost: Math.max(0, Number(event.target.value) || 0) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">计费方式</label>
+                <select
+                  value={config.audioProvider.voiceBillingMode || 'per_call'}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, voiceBillingMode: event.target.value as 'per_call' | 'per_second' },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                >
+                  {AUDIO_BILLING_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value} className="bg-card/95">{item.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">价格</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={config.audioProvider.voiceBillingPrice || 0}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, voiceBillingPrice: Math.max(0, Number(event.target.value) || 0) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">{(config.audioProvider.voiceBillingMode || 'per_call') === 'per_second' ? '每多少秒' : '每多少次'}</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.audioProvider.voiceBillingUnit || 1}
+                  onChange={(event) =>
+                    patch((prev) => ({
+                      ...prev,
+                      audioProvider: { ...prev.audioProvider, voiceBillingUnit: Math.max(1, Number(event.target.value) || 1) },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+                />
+              </div>
             </div>
           </div>
         </div>

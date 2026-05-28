@@ -29,6 +29,7 @@ export async function GET(request: NextRequest) {
         progress: typeof t.params?.progress === 'number' ? t.params.progress : 0,
         modelId: t.params?.modelId,
         model: t.params?.model,
+        errorMessage: t.errorMessage || undefined,
         upstreamTaskId: t.params?.upstreamTaskId,
         upstreamStatus: t.params?.upstreamStatus,
         upstreamState: t.params?.upstreamState,

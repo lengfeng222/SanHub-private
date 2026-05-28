@@ -166,7 +166,15 @@ export default function SettingsPage() {
   };
 
   if (!session?.user) {
-    return null;
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-6 py-8 text-center text-white/70 backdrop-blur-xl">
+          <Loader2 className="mx-auto h-6 w-6 animate-spin text-white/60" />
+          <p className="mt-3 text-lg font-medium text-white">正在加载账号设置</p>
+          <p className="mt-2 text-sm text-white/45">请稍候…</p>
+        </div>
+      </div>
+    );
   }
 
   return (

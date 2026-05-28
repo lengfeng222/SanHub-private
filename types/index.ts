@@ -8,6 +8,7 @@
 // user: 普通用户
 export type UserRole = 'user' | 'admin' | 'moderator';
 export type BillingMode = 'per_call' | 'per_second' | 'per_1k_tokens';
+export type MembershipLevel = 'normal' | 'vip' | 'svip';
 
 // 生成类型
 export type GenerationType = 'sora-video' | 'sora-image' | 'gemini-image' | 'zimage-image' | 'gitee-image' | 'music' | 'voice' | 'chat' | 'character-card';
@@ -59,6 +60,8 @@ export interface User {
   name: string;
   role: UserRole;
   balance: number; // 积分余额
+  membershipLevel?: MembershipLevel;
+  membershipExpiresAt?: number;
   disabled: boolean; // 是否禁用
   createdAt: number;
   updatedAt: number;
@@ -71,6 +74,8 @@ export interface SafeUser {
   name: string;
   role: UserRole;
   balance: number;
+  membershipLevel?: MembershipLevel;
+  membershipExpiresAt?: number;
   disabled: boolean;
   createdAt: number;
 }
@@ -216,6 +221,21 @@ export interface ImageModelFeatures {
   qualityOptions?: string[]; // 画质选项 (high/medium/low)，为空或 undefined 表示不显示
 }
 
+export interface TieredMemberPricing {
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+}
+
+export interface ImagePricingRule extends TieredMemberPricing {
+  id?: string;
+  label?: string;
+  imageSize?: string;
+  aspectRatio?: string;
+  quality?: string;
+  enabled?: boolean;
+}
+
 // 图像渠道配置
 export interface ImageChannel {
   id: string;
@@ -251,6 +271,10 @@ export interface ImageModel {
   billingMode?: BillingMode;
   billingPrice?: number;
   billingUnit?: number;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: ImagePricingRule[];
   imageUrl?: string;         // 模型封面/图标 URL
   sortOrder: number;         // 排序顺序
   createdAt: number;
@@ -287,6 +311,10 @@ export interface SafeImageModel {
   billingMode?: BillingMode;
   billingPrice?: number;
   billingUnit?: number;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: ImagePricingRule[];
   imageUrl?: string;
 }
 
@@ -338,6 +366,20 @@ export interface VideoConfigObject {
   extra_params?: Record<string, unknown>;
 }
 
+export interface VideoPricingRule extends TieredMemberPricing {
+  id?: string;
+  label?: string;
+  duration?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  qualityVersion?: string;
+  modelVersion?: string;
+  version?: string;
+  generationMode?: string;
+  offPeak?: boolean;
+  enabled?: boolean;
+}
+
 // 视频模型配置
 export interface VideoModel {
   id: string;
@@ -358,6 +400,10 @@ export interface VideoModel {
   billingMode?: BillingMode;
   billingPrice?: number;
   billingUnit?: number;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: VideoPricingRule[];
   imageUrl?: string;         // 模型封面/图标 URL
   sortOrder: number;
   createdAt: number;
@@ -391,6 +437,10 @@ export interface SafeVideoModel {
   billingMode?: BillingMode;
   billingPrice?: number;
   billingUnit?: number;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: VideoPricingRule[];
   imageUrl?: string;
 }
 
@@ -598,6 +648,8 @@ declare module 'next-auth/jwt' {
     id: string;
     role: UserRole;
     balance: number;
+    membershipLevel?: MembershipLevel;
+    membershipExpiresAt?: number;
   }
 }
 

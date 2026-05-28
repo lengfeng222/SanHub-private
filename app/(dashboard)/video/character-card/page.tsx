@@ -22,15 +22,6 @@ import type { CharacterCard, DailyLimitConfig } from '@/types';
 import { formatDate } from '@/lib/utils';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
 
-// 进行中的任务（存储在内存中，刷新后消失）
-interface PendingTask {
-  id: string;
-  avatarUrl: string;
-  status: 'pending' | 'processing' | 'failed';
-  errorMessage?: string;
-  createdAt: number;
-}
-
 // 每日使用量类型
 interface DailyUsage {
   imageCount: number;
@@ -57,8 +48,6 @@ export default function CharacterCardPage() {
   const [progressMessages, setProgressMessages] = useState<string[]>([]);
   const [characterCards, setCharacterCards] = useState<CharacterCard[]>([]);
   const [loadingCards, setLoadingCards] = useState(true);
-  // 进行中的任务（在内存中，刷新后消失）
-  const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
 
   // 每日限制
   const [dailyUsage, setDailyUsage] = useState<DailyUsage>({ imageCount: 0, videoCount: 0, characterCardCount: 0 });
@@ -123,23 +112,17 @@ export default function CharacterCardPage() {
     loadDailyUsage();
   }, []);
 
-  // 轮询检查处理中的角色卡状态（包括 pendingTasks）
+  // 轮询检查处理中的角色卡状态
   useEffect(() => {
     const hasProcessingInCards = characterCards.some(card => card.status === 'processing');
-    const hasProcessingInTasks = pendingTasks.some(task => task.status === 'processing');
-    
-    if (!hasProcessingInCards && !hasProcessingInTasks) return;
+    if (!hasProcessingInCards) return;
 
     const interval = setInterval(() => {
-      loadCharacterCards();
-      // 清理已完成或失败的 pendingTasks（已在 characterCards 中的）
-      setPendingTasks(prev => prev.filter(task => 
-        !characterCards.some(card => card.id === task.id)
-      ));
+      void loadCharacterCards();
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [characterCards, pendingTasks, loadCharacterCards]);
+  }, [characterCards, loadCharacterCards]);
 
   // 提取视频第一帧
   const extractFirstFrame = (videoUrl: string): Promise<string> => {
@@ -352,24 +335,11 @@ export default function CharacterCardPage() {
         throw new Error(data.error || '生成失败');
       }
 
-      // 添加到进行中任务列表
-      // 视频模式使用 firstFrame (data URL)，图片模式使用 base64 data URL
-      const avatarPreview = createMode === 'video' 
-        ? videoFile?.firstFrame 
-        : (imageFile?.data ? `data:image/jpeg;base64,${imageFile.data}` : '');
-      const newTask: PendingTask = {
-        id: data.data.id,
-        avatarUrl: avatarPreview || '',
-        status: 'processing',
-        createdAt: Date.now(),
-      };
-      setPendingTasks(prev => [newTask, ...prev]);
-
       toast({
         title: '任务已提交',
         description: createMode === 'image' 
-          ? '图生角色卡正在后台生成，请稍候刷新页面查看结果' 
-          : '角色卡正在后台生成，请稍候刷新页面查看结果',
+          ? '图生角色卡正在后台生成，任务会同步显示在列表中' 
+          : '角色卡正在后台生成，任务会同步显示在列表中',
       });
 
       // 更新今日使用量
@@ -382,10 +352,7 @@ export default function CharacterCardPage() {
         clearImage();
       }
 
-      // 5秒后自动刷新列表
-      setTimeout(() => {
-        loadCharacterCards();
-      }, 5000);
+      await loadCharacterCards();
 
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败');
@@ -429,7 +396,14 @@ export default function CharacterCardPage() {
   };
 
   if (!siteConfig.characterCardEnabled) {
-    return null;
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-6 py-8 text-center text-white/70 backdrop-blur-xl">
+          <p className="text-lg font-medium text-white">角色卡功能已关闭</p>
+          <p className="mt-2 text-sm text-white/45">正在返回创作页…</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -470,7 +444,7 @@ export default function CharacterCardPage() {
               <div>
                 <h2 className="text-lg font-medium text-foreground">我的角色卡</h2>
                 <p className="text-sm text-foreground/40">
-                  {characterCards.filter((c) => !pendingTasks.some((t) => t.id === c.id)).length + pendingTasks.length} 个角色卡
+                  {characterCards.length} 个角色卡
                 </p>
               </div>
             </div>
@@ -481,7 +455,7 @@ export default function CharacterCardPage() {
               <div className="flex items-center justify-center h-48">
                 <Loader2 className="w-6 h-6 animate-spin text-foreground/30" />
               </div>
-            ) : characterCards.length === 0 && pendingTasks.length === 0 ? (
+            ) : characterCards.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-48 border border-dashed border-border/70 rounded-xl bg-gradient-to-br from-emerald-500/5 to-sky-500/5">
                 <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-sky-500/10 flex items-center justify-center mb-3">
                   <User className="w-7 h-7 text-emerald-400/40" />
@@ -491,17 +465,9 @@ export default function CharacterCardPage() {
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-                {pendingTasks.map((task) => {
-                  return <PendingTaskItem key={task.id} task={task} />;
+                {characterCards.map((card) => {
+                  return <CharacterCardItem key={card.id} card={card} onDelete={handleDeleteCard} />;
                 })}
-                {characterCards
-                  .filter((card) => {
-                    const isDuplicate = pendingTasks.some((t) => t.id === card.id);
-                    return !isDuplicate;
-                  })
-                  .map((card) => {
-                    return <CharacterCardItem key={card.id} card={card} onDelete={handleDeleteCard} />;
-                  })}
               </div>
             )}
           </div>
@@ -768,45 +734,6 @@ export default function CharacterCardPage() {
             </button>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// 进行中任务卡片组件（内存中的任务，刷新后消失）
-function PendingTaskItem({ task }: { task: PendingTask }) {
-  const statusConfig = {
-    pending: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '排队中' },
-    processing: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: '生成中' },
-    failed: { bg: 'bg-red-500/20', text: 'text-red-400', label: '失败' },
-  };
-  const status = statusConfig[task.status];
-
-  return (
-    <div className="bg-card/60 border border-border/70 rounded-xl overflow-hidden hover:border-border/70 transition-all">
-      <div className="aspect-square bg-gradient-to-br from-emerald-500/10 to-sky-500/10 flex items-center justify-center relative">
-        {task.avatarUrl ? (
-          <img src={task.avatarUrl} alt="" className="w-full h-full object-cover opacity-60" />
-        ) : (
-          <User className="w-12 h-12 text-foreground/30" />
-        )}
-        <div className="absolute inset-0 bg-background/70 flex flex-col items-center justify-center gap-2">
-          {task.status === 'processing' ? (
-            <Loader2 className="w-8 h-8 text-foreground animate-spin" />
-          ) : task.status === 'pending' ? (
-            <div className="w-8 h-8 rounded-full border-2 border-amber-400/50 border-t-amber-400 animate-spin" />
-          ) : null}
-          <span className={cn('px-2.5 py-1 text-xs rounded-full font-medium', status.bg, status.text)}>
-            {status.label}
-          </span>
-        </div>
-      </div>
-      <div className="p-3">
-        <p className="text-sm text-foreground/60 truncate">正在生成...</p>
-        <p className="text-[10px] text-foreground/30 mt-1">{formatDate(task.createdAt)}</p>
-        {task.errorMessage && (
-          <p className="text-[10px] text-red-400 mt-1 truncate">{task.errorMessage}</p>
-        )}
       </div>
     </div>
   );

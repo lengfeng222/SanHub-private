@@ -1098,7 +1098,7 @@ export function ImageGenerationPage({
       </div>
 
       {!embedded ? (
-        <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+        <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
           <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-wrap items-center gap-4 sm:gap-6">

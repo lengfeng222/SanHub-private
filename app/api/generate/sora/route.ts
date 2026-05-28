@@ -10,9 +10,9 @@ import { fetchReferenceImage } from '@/lib/reference-image';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import { saveMediaAsync } from '@/lib/media-storage';
-import { calculateBillingCost } from '@/lib/billing';
 import { getVideoModelWithChannel } from '@/lib/db';
 import { getBaseUrlFromRequest } from '@/lib/epay';
+import { resolveVideoGenerationCost } from '@/lib/member-pricing';
 
 function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGenerateRequest['videoConfigObject'] {
   const raw = (input.videoConfigObject || input.video_config) as Record<string, unknown> | undefined;
@@ -377,12 +377,11 @@ export async function POST(request: NextRequest) {
         return matched ? Number.parseInt(matched[1], 10) : 8;
       })();
     const estimatedCost = videoModelConfig
-      ? calculateBillingCost({
-          billingMode: videoModelConfig.model.billingMode,
-          billingPrice: videoModelConfig.model.billingPrice,
-          billingUnit: videoModelConfig.model.billingUnit,
-          legacyCost: videoModelConfig.model.durations?.find((item) => item.value === videoModelConfig.model.defaultDuration)?.cost || systemConfig.pricing.soraVideo10s,
-          seconds: configuredSeconds,
+      ? resolveVideoGenerationCost({
+          user,
+          model: videoModelConfig.model,
+          duration: configuredSeconds,
+          videoConfigObject: normalizedVideoConfigObject,
         })
       : (() => {
           const normalizedDuration = (body.duration || body.model || '').toLowerCase();

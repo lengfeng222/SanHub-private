@@ -127,3 +127,10 @@ json.json
 *.bak
 *.tmp
 *.temp
+
+# Codex local artifacts
+.codex-checkpoints/
+.firecrawl/
+remote-*.png
+remote-*.txt
+data.db

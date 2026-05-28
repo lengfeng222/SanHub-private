@@ -1,4 +1,4 @@
-export type TaskType = 'image' | 'video';
+export type TaskType = 'image' | 'video' | 'audio';
 
 export const GENERATION_TIMEOUT_MS = 30 * 60 * 1000;
 export const GENERATION_SUBMIT_TIMEOUT_MS = GENERATION_TIMEOUT_MS;
@@ -8,6 +8,9 @@ export function getPollingInterval(elapsedMs: number, taskType: TaskType): numbe
   const isFirstMinute = elapsedMs < 60_000;
   if (taskType === 'image') {
     return isFirstMinute ? 10_000 : 30_000;
+  }
+  if (taskType === 'audio') {
+    return isFirstMinute ? 5_000 : 12_000;
   }
   return isFirstMinute ? 5_000 : 15_000;
 }

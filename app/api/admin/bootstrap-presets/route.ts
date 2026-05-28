@@ -27,6 +27,8 @@ import {
   resolveVideoModelImage,
 } from '@/lib/model-images';
 import type { ChannelType, ImageModelFeatures, VideoChannelType, VideoModelFeatures } from '@/types';
+import { createLingkeSyncedVideoModelFromName } from '@/lib/lingke-video-pricing';
+import { fetchLingkeSyncedVideoModelsForChannel } from '@/lib/lingke-video-sync';
 
 export const dynamic = 'force-dynamic';
 
@@ -98,32 +100,7 @@ const IMAGE_VISIBLE_MODELS = [
   { name: 'SD 2.0 全能参考', apiModel: 'SD 2.0 全能参考', requiresReferenceImage: true },
 ] as const;
 
-const VIDEO_VISIBLE_MODELS = [
-  { name: '万相 2.7 视频续写', imageUrl: 'https://cos.lingkeai.vip/qwen.svg' },
-  { name: 'Vidu Q3 参考生', imageUrl: 'https://cos.lingkeai.vip/vidu-icon.svg' },
-  { name: '快乐马-视频编辑', imageUrl: 'https://cos.lingkeai.vip/happyhorse.svg' },
-  { name: 'veo3.1-lite', imageUrl: 'https://cos.lingkeai.vip/gemini.svg' },
-  { name: '快乐马-首帧', imageUrl: 'https://cos.lingkeai.vip/happyhorse.svg' },
-  { name: 'Pix V5.6 首尾帧', imageUrl: 'https://cos.lingkeai.vip/PixVerse.svg' },
-  { name: 'Pix C1 首尾帧', imageUrl: 'https://cos.lingkeai.vip/PixVerse.svg' },
-  { name: 'VIDU-解说漫', imageUrl: 'https://cos.lingkeai.vip/vidu-icon.svg' },
-  { name: 'Pix C1 参考生', imageUrl: 'https://cos.lingkeai.vip/PixVerse.svg' },
-  { name: '可灵-Omni 首尾帧', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '可灵-Omni 参考生', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: 'Pix V6 首尾帧', imageUrl: 'https://cos.lingkeai.vip/PixVerse.svg' },
-  { name: '可灵-V3', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '可灵-动作控制 V3', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '可灵-Omni 视频参考', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '可灵-V3-Omni', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '可灵-V3-video', imageUrl: 'https://cos.lingkeai.vip/kling.svg' },
-  { name: '快乐马-参考生', imageUrl: 'https://cos.lingkeai.vip/happyhorse.svg' },
-  { name: '万相 2.7 参考生', imageUrl: 'https://cos.lingkeai.vip/qwen.svg' },
-  { name: 'SD 2.0 首尾帧', imageUrl: 'https://cos.lingkeai.vip/doubao.svg' },
-  { name: 'Pix V5.6 参考生', imageUrl: 'https://cos.lingkeai.vip/PixVerse.svg' },
-  { name: '万相 2.7 首尾帧', imageUrl: 'https://cos.lingkeai.vip/qwen.svg' },
-  { name: '快乐马-文生视频', imageUrl: 'https://cos.lingkeai.vip/happyhorse.svg' },
-  { name: 'SD 2.0 参考生', imageUrl: 'https://cos.lingkeai.vip/doubao.svg' },
-] as const;
+const VIDEO_VISIBLE_MODELS: Array<{ name: string; imageUrl?: string }> = [];
 
 const COMMON_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4'];
 const COMMON_IMAGE_RESOLUTIONS: Record<string, string> = {
@@ -260,55 +237,79 @@ async function ensureLingkeVideoPresets(apiKey?: string) {
     }
   }
 
-  for (const preset of VIDEO_VISIBLE_MODELS) {
-    const { name, imageUrl } = preset;
-    const exists = models.find((item) => item.channelId === channel.id && item.name === name);
+  let synced = [];
+  try {
+    synced = await fetchLingkeSyncedVideoModelsForChannel({
+      baseUrl: channel.baseUrl,
+      apiKey: channel.apiKey,
+    });
+  } catch {
+    synced = VIDEO_VISIBLE_MODELS.map((item) => createLingkeSyncedVideoModelFromName(item.name, item.imageUrl));
+  }
+
+  const currentModels = models.filter((item) => item.channelId === channel.id);
+
+  for (const preset of synced) {
+    const exists = currentModels.find((item) => item.apiModel === preset.apiModel || item.name === preset.name);
+    const nextImageUrl = resolveVideoModelImage({
+      name: preset.name,
+      apiModel: preset.apiModel,
+      imageUrl: preset.imageUrl,
+    });
+
     if (exists) {
-      const nextImageUrl = resolveVideoModelImage({
-        name: exists.name,
-        apiModel: exists.apiModel,
-        imageUrl: exists.imageUrl || imageUrl,
+      await updateVideoModel(exists.id, {
+        name: preset.name,
+        description: preset.description,
+        apiModel: preset.apiModel,
+        features: preset.features,
+        aspectRatios: preset.aspectRatios,
+        durations: preset.durations,
+        defaultAspectRatio: preset.defaultAspectRatio,
+        defaultDuration: preset.defaultDuration,
+        videoConfigObject: preset.videoConfigObject,
+        highlight: preset.highlight ?? exists.highlight,
+        enabled: true,
+        billingMode: preset.billingMode,
+        billingPrice: preset.billingPrice,
+        billingUnit: preset.billingUnit,
+        normalPrice: preset.normalPrice,
+        vipPrice: preset.vipPrice,
+        svipPrice: preset.svipPrice,
+        pricingRules: preset.pricingRules || [],
+        imageUrl: nextImageUrl,
       });
-      if ((!exists.imageUrl || isPlaceholderModelImageUrl(exists.imageUrl)) && nextImageUrl) {
-        await updateVideoModel(exists.id, { imageUrl: nextImageUrl });
-        created.push(`视频模型已补图: ${name}`);
-      }
+      created.push(`视频模型已同步: ${preset.name}`);
       continue;
     }
+
     const model = await createVideoModel({
       channelId: channel.id,
-      name,
-      description: name === 'veo3.1-lite' ? '灵刻站可见视频模型，已验证可创建任务。' : '灵刻站可见视频模型',
-      apiModel: name,
+      name: preset.name,
+      description: preset.description,
+      apiModel: preset.apiModel,
       baseUrl: undefined,
       apiKey: undefined,
-      features: VIDEO_FEATURES,
-      aspectRatios: [
-        { value: '16:9', label: '16:9' },
-        { value: '9:16', label: '9:16' },
-        { value: '1:1', label: '1:1' },
-      ],
-      durations: [{ value: '8s', label: '8 秒', cost: 100 }],
-      defaultAspectRatio: '16:9',
-      defaultDuration: '8s',
-      videoConfigObject: {
-        aspect_ratio: '16:9',
-        video_length: 8,
-        resolution: '720P',
-        preset: 'normal',
-        generation_mode: 'normal',
-        off_peak: false,
-      },
-      highlight: true,
+      features: preset.features,
+      aspectRatios: preset.aspectRatios,
+      durations: preset.durations,
+      defaultAspectRatio: preset.defaultAspectRatio,
+      defaultDuration: preset.defaultDuration,
+      videoConfigObject: preset.videoConfigObject,
+      highlight: preset.highlight ?? true,
       enabled: true,
-      billingMode: 'per_second',
-      billingPrice: 12,
-      billingUnit: 1,
-      imageUrl: resolveVideoModelImage({ name, apiModel: name, imageUrl }),
-      sortOrder: models.filter((item) => item.channelId === channel.id).length,
+      billingMode: preset.billingMode,
+      billingPrice: preset.billingPrice,
+      billingUnit: preset.billingUnit,
+      normalPrice: preset.normalPrice,
+      vipPrice: preset.vipPrice,
+      svipPrice: preset.svipPrice,
+      pricingRules: preset.pricingRules || [],
+      imageUrl: nextImageUrl,
+      sortOrder: currentModels.length,
     });
-    models.push(model);
-    created.push(`视频模型: ${name}`);
+    currentModels.push(model);
+    created.push(`视频模型: ${preset.name}`);
   }
 
   return created;

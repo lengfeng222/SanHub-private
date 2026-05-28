@@ -67,6 +67,10 @@ export async function POST(request: NextRequest) {
       billingMode,
       billingPrice,
       billingUnit,
+      normalPrice,
+      vipPrice,
+      svipPrice,
+      pricingRules,
       imageUrl,
       sortOrder,
     } = body;
@@ -103,6 +107,10 @@ export async function POST(request: NextRequest) {
       billingMode: billingMode || 'per_call',
       billingPrice: billingPrice ?? costPerGeneration ?? 10,
       billingUnit: billingUnit || 1,
+      normalPrice: normalPrice ?? undefined,
+      vipPrice: vipPrice ?? undefined,
+      svipPrice: svipPrice ?? undefined,
+      pricingRules: Array.isArray(pricingRules) ? pricingRules : [],
       imageUrl: imageUrl || undefined,
       sortOrder: sortOrder || 0,
     });

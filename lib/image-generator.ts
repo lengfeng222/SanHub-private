@@ -21,6 +21,24 @@ export interface ImageGenerateRequest {
   idempotencyKey?: string;
 }
 
+export type ImageGenerationProgressCallback = (
+  progress: number,
+  meta?: Record<string, unknown>
+) => void | Promise<void>;
+
+export type LingkeMediaImageTaskSnapshot = {
+  taskId: string;
+  code: number;
+  status: string;
+  state: 'pending' | 'processing' | 'completed' | 'failed' | '';
+  statusGroup: 'pending' | 'processing' | 'completed' | 'failed' | 'timeout';
+  progress: number;
+  message?: string;
+  resultUrl?: string;
+  final: boolean;
+  raw: unknown;
+};
+
 // Key 轮询索引
 const keyIndexMap = new Map<string, number>();
 
@@ -77,6 +95,8 @@ const isSizeValue = (value: string): boolean =>
 
 const GENERATION_POST_RETRY_OPTIONS = { attempts: 1 };
 const IMAGE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const LINGKE_MEDIA_IMAGE_POLL_INTERVAL_MS = 3000;
+const LINGKE_MEDIA_IMAGE_MAX_POLLS = 1200;
 
 const imageAgent = new Agent({
   bodyTimeout: 0,
@@ -214,6 +234,147 @@ function buildOpenAIImageInput(
 
   if (refs.length === 0) return undefined;
   return refs.length === 1 ? refs[0] : refs;
+}
+
+function clampLingkeProgress(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function normalizeLingkeStatus(status: string): 'pending' | 'processing' | 'completed' | 'failed' | '' {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return '';
+
+  if (
+    normalized.includes('queue') ||
+    normalized.includes('wait') ||
+    normalized.includes('pending') ||
+    normalized.includes('submit') ||
+    normalized.includes('created') ||
+    normalized.includes('等待') ||
+    normalized.includes('排队') ||
+    normalized.includes('创建')
+  ) {
+    return 'pending';
+  }
+
+  if (
+    normalized.includes('fail') ||
+    normalized.includes('error') ||
+    normalized.includes('cancel') ||
+    normalized.includes('失败') ||
+    normalized.includes('错误') ||
+    normalized.includes('取消') ||
+    normalized.includes('异常')
+  ) {
+    return 'failed';
+  }
+
+  if (
+    normalized.includes('success') ||
+    normalized.includes('done') ||
+    normalized.includes('finish') ||
+    normalized.includes('completed') ||
+    normalized.includes('succeeded') ||
+    normalized.includes('成功') ||
+    normalized.includes('完成') ||
+    normalized.includes('已完成')
+  ) {
+    return 'completed';
+  }
+
+  if (
+    normalized.includes('process') ||
+    normalized.includes('running') ||
+    normalized.includes('render') ||
+    normalized.includes('处理中') ||
+    normalized.includes('生成中') ||
+    normalized.includes('执行中') ||
+    normalized.includes('渲染中')
+  ) {
+    return 'processing';
+  }
+
+  return 'processing';
+}
+
+function resolveLingkeStatusGroup(
+  status: string,
+  hasResult: boolean
+): 'pending' | 'processing' | 'completed' | 'failed' | 'timeout' {
+  if (hasResult) return 'completed';
+
+  const normalized = normalizeLingkeStatus(status);
+  if (!normalized) return 'processing';
+  if (normalized === 'pending') return 'pending';
+  if (normalized === 'failed') return 'failed';
+  if (normalized === 'completed') return 'completed';
+  return 'processing';
+}
+
+function buildLingkeImageTaskSnapshot(
+  taskId: string,
+  data: any
+): LingkeMediaImageTaskSnapshot {
+  const resultUrl = pickImageUrl(data?.data) || pickImageUrl(data);
+  const statusLabel = String(data?.data?.status || data?.status || '').trim();
+  const message = String(data?.data?.error || data?.error || data?.data?.msg || data?.msg || '').trim() || undefined;
+  const state = normalizeLingkeStatus(String(data?.data?.state || data?.state || '').trim() || statusLabel || message || '');
+  const numericProgress = Number(
+    data?.data?.progress
+      ?? data?.progress
+      ?? data?.data?.percentage
+      ?? data?.percentage
+      ?? NaN
+  );
+
+  let progress = Number.isFinite(numericProgress)
+    ? clampLingkeProgress(numericProgress)
+    : 0;
+
+  if (!progress) {
+    if (resultUrl) progress = 100;
+    else if (state === 'pending') progress = 10;
+    else if (state === 'processing') progress = 60;
+    else if (state === 'failed') progress = 0;
+  }
+
+  return {
+    taskId,
+    code: Number(data?.code ?? 0),
+    status: statusLabel || message || '',
+    state,
+    statusGroup: resolveLingkeStatusGroup(statusLabel || message || '', Boolean(resultUrl)),
+    progress,
+    message,
+    resultUrl: resultUrl || undefined,
+    final: Boolean(resultUrl),
+    raw: data,
+  };
+}
+
+export async function fetchLingkeMediaImageTaskSnapshot(
+  baseUrl: string,
+  apiKey: string,
+  channelId: string,
+  taskId: string
+): Promise<LingkeMediaImageTaskSnapshot> {
+  const statusUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/status?task_id=${encodeURIComponent(taskId)}`;
+  const key = getNextApiKey(apiKey, channelId);
+  const response = await fetchWithRetry(undiciFetch, statusUrl, () => ({
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${key}`,
+    },
+    dispatcher: imageAgent,
+  }));
+
+  const data: any = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`灵刻媒体查询失败 (${response.status})`);
+  }
+
+  return buildLingkeImageTaskSnapshot(taskId, data);
 }
 
 export function resolveImageTarget(
@@ -1063,36 +1224,38 @@ async function pollLingkeMediaImageTask(
   baseUrl: string,
   apiKey: string,
   channelId: string,
-  taskId: string
-): Promise<any> {
-  const statusUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/status?task_id=${encodeURIComponent(taskId)}`;
+  taskId: string,
+  onProgress?: ImageGenerationProgressCallback
+): Promise<LingkeMediaImageTaskSnapshot> {
+  for (let attempt = 0; attempt < LINGKE_MEDIA_IMAGE_MAX_POLLS; attempt += 1) {
+    const snapshot = await fetchLingkeMediaImageTaskSnapshot(baseUrl, apiKey, channelId, taskId);
 
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const key = getNextApiKey(apiKey, channelId);
-    const response = await fetchWithRetry(undiciFetch, statusUrl, () => ({
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${key}`,
-      },
-      dispatcher: imageAgent,
-    }));
-
-    const data: any = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(`灵刻媒体查询失败 (${response.status})`);
+    if (snapshot.final && snapshot.resultUrl) {
+      await onProgress?.(100, {
+        upstreamTaskId: snapshot.taskId,
+        upstreamStatus: snapshot.status || '已完成',
+        upstreamState: snapshot.state || 'completed',
+        upstreamStatusGroup: 'completed',
+        upstreamProgress: 100,
+        upstreamResultUrl: snapshot.resultUrl,
+        upstreamFinal: true,
+      });
+      return snapshot;
     }
 
-    const imageUrl = pickImageUrl(data?.data) || pickImageUrl(data);
-    if (Number(data?.code ?? 0) === 200 && imageUrl) {
-      return data;
+    if (snapshot.state === 'failed') {
+      throw new Error(snapshot.message || snapshot.status || '灵刻媒体任务失败');
     }
 
-    const status = String(data?.data?.status || data?.status || '').toLowerCase();
-    if (status === 'failed' || status === 'error' || status === 'cancelled') {
-      throw new Error(String(data?.data?.msg || data?.msg || '灵刻媒体任务失败'));
-    }
+    await onProgress?.(Math.min(95, Math.max(snapshot.progress, 10)), {
+      upstreamTaskId: snapshot.taskId,
+      upstreamStatus: snapshot.status || snapshot.message || undefined,
+      upstreamState: snapshot.state || undefined,
+      upstreamStatusGroup: snapshot.statusGroup,
+      upstreamProgress: Math.min(95, Math.max(snapshot.progress, 10)),
+    });
 
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, LINGKE_MEDIA_IMAGE_POLL_INTERVAL_MS));
   }
 
   throw new Error('灵刻媒体图片任务超时');
@@ -1103,7 +1266,8 @@ async function generateWithLingkeMedia(
   baseUrl: string,
   apiKey: string,
   apiModel: string,
-  channelId: string
+  channelId: string,
+  onProgress?: ImageGenerationProgressCallback
 ): Promise<GenerateResult> {
   const key = getNextApiKey(apiKey, channelId);
   const apiUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/generate`;
@@ -1152,6 +1316,14 @@ async function generateWithLingkeMedia(
 
   const directUrl = pickImageUrl(data?.data) || pickImageUrl(data);
   if (directUrl) {
+    await onProgress?.(100, {
+      upstreamStatus: String(data?.msg || '已完成'),
+      upstreamState: 'completed',
+      upstreamStatusGroup: 'completed',
+      upstreamProgress: 100,
+      upstreamResultUrl: directUrl,
+      upstreamFinal: true,
+    });
     return {
       type: 'gemini-image',
       url: directUrl,
@@ -1164,8 +1336,22 @@ async function generateWithLingkeMedia(
     throw new Error('灵刻媒体未返回任务 ID');
   }
 
-  const finalData = await pollLingkeMediaImageTask(baseUrl, apiKey, channelId, String(taskId));
-  const resultUrl = pickImageUrl(finalData?.data) || pickImageUrl(finalData);
+  await onProgress?.(10, {
+    upstreamTaskId: String(taskId),
+    upstreamStatus: String(data?.msg || '任务创建成功'),
+    upstreamState: 'created',
+    upstreamStatusGroup: 'pending',
+    upstreamProgress: 10,
+  });
+
+  const finalSnapshot = await pollLingkeMediaImageTask(
+    baseUrl,
+    apiKey,
+    channelId,
+    String(taskId),
+    onProgress
+  );
+  const resultUrl = finalSnapshot.resultUrl;
   if (!resultUrl) {
     throw new Error('灵刻媒体任务完成但未返回图片');
   }
@@ -1181,7 +1367,10 @@ async function generateWithLingkeMedia(
 // 统一入口
 // ========================================
 
-export async function generateImage(request: ImageGenerateRequest): Promise<GenerateResult> {
+export async function generateImage(
+  request: ImageGenerateRequest,
+  onProgress?: ImageGenerationProgressCallback
+): Promise<GenerateResult> {
   const modelConfig = await getImageModelWithChannel(request.modelId);
   if (!modelConfig) {
     throw new Error('模型不存在或未配置');
@@ -1281,7 +1470,8 @@ export async function generateImage(request: ImageGenerateRequest): Promise<Gene
         effectiveBaseUrl,
         effectiveApiKey,
         resolvedTarget.model,
-        channel.id
+        channel.id,
+        onProgress
       );
       break;
 

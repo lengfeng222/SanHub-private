@@ -6,6 +6,7 @@ import {
   Check,
   CheckSquare,
   Clock3,
+  Crown,
   ImagePlus,
   Repeat,
   Sparkles,
@@ -15,7 +16,16 @@ import {
   Volume2,
   Wand2,
 } from 'lucide-react';
-import { calculateBillingCost, formatBillingSummary } from '@/lib/billing';
+import { formatBillingSummary } from '@/lib/billing';
+import {
+  getEffectiveMembershipLevel,
+  MEMBERSHIP_LABELS,
+  MEMBERSHIP_RECHARGE_TIERS,
+  PRICING_REFERENCE_ROWS,
+  getVideoPricingPreviewLabel,
+  resolveImageGenerationCost,
+  resolveVideoGenerationCost,
+} from '@/lib/member-pricing';
 import {
   buildTaskFromGeneration,
   deleteGenerationRecord,
@@ -96,6 +106,10 @@ type VideoModelSummary = Pick<
   | 'billingMode'
   | 'billingPrice'
   | 'billingUnit'
+  | 'normalPrice'
+  | 'vipPrice'
+  | 'svipPrice'
+  | 'pricingRules'
   | 'durations'
   | 'defaultAspectRatio'
   | 'defaultDuration'
@@ -112,6 +126,7 @@ type VideoUploadSlot =
   | 'reference-image'
   | 'reference-video'
   | 'first-frame'
+  | 'first-last-frames'
   | 'last-frame'
   | 'motion-reference';
 
@@ -121,6 +136,8 @@ type VideoReferenceSlotConfig = {
   hint: string;
   accept: string;
   multiple?: boolean;
+  minFiles?: number;
+  maxFiles?: number;
 };
 
 type VideoModelFamilyKey =
@@ -371,12 +388,14 @@ function buildVideoModelCover(model: VideoModelSummary): string {
   const family = VIDEO_MODEL_FAMILY_STYLES[resolveVideoModelFamily(model)];
   const badge = getVideoModelBadge(model);
   const kindLabel = getVideoModelKindLabel(model);
-  const billingText = formatBillingSummary({
-    billingMode: model.billingMode,
-    billingPrice: model.billingPrice,
-    billingUnit: model.billingUnit,
-    legacyCost: model.durations?.[0]?.cost,
-  });
+  const billingText =
+    getVideoPricingPreviewLabel(model, model.defaultDuration, model.videoConfigObject)
+    || formatBillingSummary({
+      billingMode: model.billingMode,
+      billingPrice: model.billingPrice,
+      billingUnit: model.billingUnit,
+      legacyCost: model.durations?.[0]?.cost,
+    });
 
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" fill="none">
@@ -416,6 +435,11 @@ function buildVideoModelCover(model: VideoModelSummary): string {
 
 function buildVideoModelCardMeta(model: VideoModelSummary): VideoModelCardMeta {
   const family = VIDEO_MODEL_FAMILY_STYLES[resolveVideoModelFamily(model)];
+  const previewLabel = getVideoPricingPreviewLabel(
+    model,
+    model.defaultDuration,
+    model.videoConfigObject
+  );
   return {
     familyLabel: family.label,
     familySubtitle: family.subtitle,
@@ -425,13 +449,15 @@ function buildVideoModelCardMeta(model: VideoModelSummary): VideoModelCardMeta {
         name: model.name,
         apiModel: model.apiModel,
         imageUrl: model.imageUrl,
-      }) || buildVideoModelCover(model),
-    billingText: formatBillingSummary({
-      billingMode: model.billingMode,
-      billingPrice: model.billingPrice,
-      billingUnit: model.billingUnit,
-      legacyCost: model.durations?.[0]?.cost,
-    }),
+    }) || buildVideoModelCover(model),
+    billingText:
+      previewLabel
+      || formatBillingSummary({
+        billingMode: model.billingMode,
+        billingPrice: model.billingPrice,
+        billingUnit: model.billingUnit,
+        legacyCost: model.durations?.[0]?.cost,
+      }),
   };
 }
 
@@ -440,6 +466,21 @@ function getVideoModelRawName(model?: VideoModelSummary) {
 }
 
 function getVideoModelInputMode(model?: VideoModelSummary) {
+  const extra = getVideoModelExtraParams(model);
+  const configuredMode = String(extra.upload_mode || extra.input_mode || '').trim().toLowerCase();
+  if (
+    configuredMode === 'text'
+    || configuredMode === 'reference'
+    || configuredMode === 'first_frame'
+    || configuredMode === 'first_last_frame'
+    || configuredMode === 'video_reference'
+    || configuredMode === 'video_continue'
+    || configuredMode === 'video_edit'
+    || configuredMode === 'motion_control'
+  ) {
+    return configuredMode;
+  }
+
   const raw = getVideoModelRawName(model);
   if (raw.includes('动作控制')) return 'motion_control';
   if (raw.includes('视频续写') || raw.includes('续写')) return 'video_continue';
@@ -459,8 +500,136 @@ function getVideoModelExtraParams(model?: VideoModelSummary): Record<string, unk
   return {};
 }
 
+function getVideoUploadParamMeta(model?: VideoModelSummary): Record<string, {
+  kind?: 'image' | 'video' | 'audio';
+  label?: string;
+  description?: string;
+  multiple?: boolean;
+  minFiles?: number;
+  maxFiles?: number;
+  accept?: string;
+}> {
+  const extra = getVideoModelExtraParams(model);
+  const meta = extra.upload_param_meta;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    return meta as Record<string, {
+      kind?: 'image' | 'video' | 'audio';
+      label?: string;
+      description?: string;
+      multiple?: boolean;
+      minFiles?: number;
+      maxFiles?: number;
+      accept?: string;
+    }>;
+  }
+  return {};
+}
+
+function buildVideoSlotFromMeta(
+  key: VideoUploadSlot,
+  fallbackLabel: string,
+  fallbackHint: string,
+  fallbackAccept: string,
+  meta?: {
+    label?: string;
+    description?: string;
+    multiple?: boolean;
+    minFiles?: number;
+    maxFiles?: number;
+    accept?: string;
+  }
+): VideoReferenceSlotConfig {
+  const maxFiles = Number(meta?.maxFiles || 0);
+  const minFiles = Number(meta?.minFiles || 0);
+  const multiple = Boolean(meta?.multiple || maxFiles > 1);
+  const countHint = maxFiles > 1
+    ? `支持 ${minFiles > 0 ? `${minFiles}-${maxFiles}` : `最多 ${maxFiles}`} 个文件`
+    : '';
+
+  return {
+    key,
+    label: meta?.label || fallbackLabel,
+    hint: [meta?.description || fallbackHint, countHint].filter(Boolean).join(' · '),
+    accept: meta?.accept || fallbackAccept,
+    multiple,
+    minFiles: minFiles > 0 ? minFiles : undefined,
+    maxFiles: maxFiles > 0 ? maxFiles : undefined,
+  };
+}
+
 function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotConfig[] {
   const mode = getVideoModelInputMode(model);
+  const uploadMeta = Object.entries(getVideoUploadParamMeta(model));
+  const imageMeta = uploadMeta.find(([, value]) => value.kind === 'image')?.[1];
+  const videoMeta = uploadMeta.find(([, value]) => value.kind === 'video')?.[1];
+
+  if (mode === 'first_last_frame' && imageMeta) {
+    return [
+      buildVideoSlotFromMeta(
+        'first-last-frames',
+        '首帧 / 尾帧参考',
+        '按顺序上传 1-2 张图片：第一张为首帧，第二张为尾帧',
+        'image/*',
+        {
+          ...imageMeta,
+          multiple: true,
+          maxFiles: imageMeta.maxFiles || 2,
+        },
+      ),
+    ];
+  }
+
+  if (mode === 'first_frame' && imageMeta) {
+    return [
+      buildVideoSlotFromMeta(
+        'first-frame',
+        '首帧参考',
+        '上传单张首帧作为镜头起始',
+        'image/*',
+        imageMeta,
+      ),
+    ];
+  }
+
+  if ((mode === 'video_reference' || mode === 'video_continue' || mode === 'video_edit') && (videoMeta || imageMeta)) {
+    const slots: VideoReferenceSlotConfig[] = [];
+    if (videoMeta) {
+      slots.push(
+        buildVideoSlotFromMeta(
+          'reference-video',
+          mode === 'video_continue' ? '续写视频' : '参考视频',
+          mode === 'video_edit' ? '上传待编辑视频，延续原视频内容' : '上传参考视频，跟随上游能力继续生成',
+          'video/*',
+          videoMeta,
+        )
+      );
+    }
+    if (imageMeta) {
+      slots.push(
+        buildVideoSlotFromMeta(
+          'reference-image',
+          '参考图',
+          '上传参考图片，辅助主体、风格或镜头控制',
+          'image/*',
+          imageMeta,
+        )
+      );
+    }
+    if (slots.length > 0) return slots;
+  }
+
+  if (mode === 'reference' && imageMeta) {
+    return [
+      buildVideoSlotFromMeta(
+        'reference-image',
+        '参考图',
+        '上传参考图片，控制主体、风格或构图',
+        'image/*',
+        imageMeta,
+      ),
+    ];
+  }
+
   switch (mode) {
     case 'first_last_frame':
       return [
@@ -619,6 +788,26 @@ function getVideoCapabilityChips(model?: VideoModelSummary): string[] {
   return Array.from(chips);
 }
 
+function sortUploadedFilesForSubmit(files: UploadedMedia[]) {
+  const slotOrder: VideoUploadSlot[] = [
+    'first-frame',
+    'first-last-frames',
+    'last-frame',
+    'motion-reference',
+    'reference-image',
+    'reference-video',
+    'generic',
+  ];
+
+  return [...files].sort((left, right) => {
+    const leftIndex = slotOrder.indexOf((left.slot || 'generic') as VideoUploadSlot);
+    const rightIndex = slotOrder.indexOf((right.slot || 'generic') as VideoUploadSlot);
+    const safeLeft = leftIndex === -1 ? 99 : leftIndex;
+    const safeRight = rightIndex === -1 ? 99 : rightIndex;
+    return safeLeft - safeRight;
+  });
+}
+
 function filterVideoModelsByVariant(variant: VideoVariant, models: VideoModelSummary[]) {
   if (variant === 'sora2') {
     const filtered = models.filter((model) => /sora/i.test(`${model.name} ${model.apiModel || ''}`));
@@ -636,27 +825,29 @@ function filterVideoModelsByVariant(variant: VideoVariant, models: VideoModelSum
 function pickPreferredVideoModel(models: VideoModelSummary[]): VideoModelSummary | undefined {
   if (models.length === 0) return undefined;
 
-  const score = (model: VideoModelSummary) => {
-    const raw = `${model.name} ${model.apiModel || ''}`.toLowerCase();
-    let total = 0;
-
-    if (model.features?.textToVideo) total += 6;
-    if (!model.features?.imageToVideo) total += 2;
-    if (model.highlight) total += 1;
-
-    if (raw.includes('文生')) total += 8;
-    if (raw.includes('veo3.1-lite')) total += 7;
-    if (raw.includes('快乐马-文生视频')) total += 7;
-
-    if (raw.includes('参考生') || raw.includes('参考')) total -= 8;
-    if (raw.includes('首尾帧')) total -= 6;
-    if (raw.includes('续写')) total -= 7;
-    if (raw.includes('编辑')) total -= 7;
-
-    return total;
-  };
+  const score = (model: VideoModelSummary) => getVideoModelDisplayScore(model);
 
   return [...models].sort((a, b) => score(b) - score(a))[0];
+}
+
+function getVideoModelDisplayScore(model: VideoModelSummary) {
+  const raw = `${model.name} ${model.apiModel || ''}`.toLowerCase();
+  let total = 0;
+
+  if (model.features?.textToVideo) total += 6;
+  if (!model.features?.imageToVideo) total += 2;
+  if (model.highlight) total += 1;
+
+  if (raw.includes('文生')) total += 8;
+  if (raw.includes('veo3.1-lite')) total += 7;
+  if (raw.includes('快乐马-文生视频')) total += 7;
+
+  if (raw.includes('参考生') || raw.includes('参考')) total -= 8;
+  if (raw.includes('首尾帧')) total -= 6;
+  if (raw.includes('续写')) total -= 7;
+  if (raw.includes('编辑')) total -= 7;
+
+  return total;
 }
 
 function parseDurationSeconds(value?: string, fallback = 8): number {
@@ -664,22 +855,26 @@ function parseDurationSeconds(value?: string, fallback = 8): number {
   return matched ? Number.parseInt(matched[1], 10) || fallback : fallback;
 }
 
-function estimateVideoCost(model: VideoModelSummary | undefined, duration: string): number | null {
+function estimateVideoCost(
+  model: VideoModelSummary | undefined,
+  duration: string,
+  user?: { membershipLevel?: 'normal' | 'vip' | 'svip'; membershipExpiresAt?: number },
+  resolution?: string,
+  aspectRatio?: string
+): number | null {
   if (!model) return null;
 
   const seconds = parseDurationSeconds(duration || model.defaultDuration, 8);
-  const durations = model.durations || [];
-  const legacyCost =
-    durations.find((item) => item.value === model.defaultDuration)?.cost ??
-    durations[0]?.cost ??
-    0;
-
-  return calculateBillingCost({
-    billingMode: model.billingMode,
-    billingPrice: model.billingPrice,
-    billingUnit: model.billingUnit,
-    legacyCost,
-    seconds,
+  return resolveVideoGenerationCost({
+    user,
+    model,
+    duration: seconds,
+    aspectRatio,
+    videoConfigObject: {
+      ...(model.videoConfigObject || {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio as VideoConfigObject['aspect_ratio'] } : {}),
+      ...(resolution ? { resolution: resolution.toUpperCase() } : {}),
+    },
   });
 }
 
@@ -720,7 +915,7 @@ function FloatingGenerateBar({
   const options = quantityOptions && quantityOptions.length > 0 ? quantityOptions : [quantityValue];
 
   return (
-    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
       <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-4 sm:gap-6">
@@ -821,7 +1016,7 @@ function filterImageTasksByVariant(variant: ImageVariant, tasks: Task[]) {
 }
 
 export function ImageToolPage({ variant }: { variant: ImageVariant }) {
-  const { update } = useSession();
+  const { data: session, update } = useSession();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const refreshGenerationFeedRef = useRef<() => Promise<void>>(async () => {});
   const isGpt = variant === 'gptimage';
@@ -873,14 +1068,14 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   const imageGenerationCount = parseQuantityCount(quantity);
   const imageEstimatedCost = useMemo(() => {
     if (!hasConfiguredModel || !selectedModel) return null;
-    const perImageCost = calculateBillingCost({
-      billingMode: selectedModel.billingMode,
-      billingPrice: selectedModel.billingPrice,
-      billingUnit: selectedModel.billingUnit,
-      legacyCost: selectedModel.costPerGeneration,
+    const perImageCost = resolveImageGenerationCost({
+      user: session?.user,
+      model: selectedModel,
+      imageSize: size,
+      aspectRatio: aspect || selectedModel.defaultAspectRatio,
     });
     return perImageCost * imageGenerationCount;
-  }, [hasConfiguredModel, imageGenerationCount, selectedModel]);
+  }, [aspect, hasConfiguredModel, imageGenerationCount, selectedModel, session?.user, size]);
   const imageCostLabel = hasConfiguredModel
     ? `${imageEstimatedCost ?? 0} 积分`
     : '请先选择模型';
@@ -1302,7 +1497,7 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
 }
 
 export function VideoToolPage({ variant }: { variant: VideoVariant }) {
-  const { update } = useSession();
+  const { data: session, update } = useSession();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const refreshGenerationFeedRef = useRef<() => Promise<void>>(async () => {});
   const [prompt, setPrompt] = useState('');
@@ -1365,17 +1560,32 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     [aspect, aspectOptions, currentModel]
   );
   const estimatedCost = useMemo(
-    () => estimateVideoCost(currentModel, duration),
-    [currentModel, duration]
+    () => estimateVideoCost(
+      currentModel,
+      duration,
+      session?.user,
+      resolution || getDefaultResolution(currentModel),
+      selectedAspect?.value || currentModel?.defaultAspectRatio
+    ),
+    [currentModel, duration, resolution, selectedAspect?.value, session?.user]
   );
   const costLabel = hasConfiguredModel
     ? `${estimatedCost ?? currentModel?.durations?.[0]?.cost ?? 0} 积分`
     : '请先选择模型';
-  const visibleModels = useMemo(
-    () => (showAllModels ? models : models.slice(0, 9)),
-    [models, showAllModels]
+  const sortedModels = useMemo(
+    () => [...models].sort((left, right) => {
+      const scoreDiff = getVideoModelDisplayScore(right) - getVideoModelDisplayScore(left);
+      if (scoreDiff !== 0) return scoreDiff;
+      if (Boolean(right.highlight) !== Boolean(left.highlight)) return Number(Boolean(right.highlight)) - Number(Boolean(left.highlight));
+      return (left.name || '').localeCompare(right.name || '', 'zh-CN');
+    }),
+    [models]
   );
-  const hiddenCount = Math.max(0, models.length - visibleModels.length);
+  const visibleModels = useMemo(
+    () => (showAllModels ? sortedModels : sortedModels.slice(0, 9)),
+    [showAllModels, sortedModels]
+  );
+  const hiddenCount = Math.max(0, sortedModels.length - visibleModels.length);
   const hasInput = Boolean(prompt.trim() || uploadedFiles.length > 0);
   const groupedUploads = useMemo(
     () =>
@@ -1413,6 +1623,10 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
             billingMode: item.billingMode,
             billingPrice: item.billingPrice,
             billingUnit: item.billingUnit,
+            normalPrice: item.normalPrice,
+            vipPrice: item.vipPrice,
+            svipPrice: item.svipPrice,
+            pricingRules: item.pricingRules,
             durations: item.durations || [],
             defaultDuration: item.defaultDuration || '8s',
             imageUrl: item.imageUrl,
@@ -1478,6 +1692,24 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
       return 'normal';
     });
   }, [aspectOptions, currentModel, durationOptions, referenceCountOptions, resolutionOptions]);
+
+  useEffect(() => {
+    const allowedSlots = new Map(referenceSlots.map((slot) => [slot.key, slot]));
+    setUploadedFiles((prev) => {
+      const counters = new Map<VideoUploadSlot, number>();
+      return prev.filter((file) => {
+        const slotKey = (file.slot || 'generic') as VideoUploadSlot;
+        const slot = allowedSlots.get(slotKey);
+        if (!slot) return false;
+        const nextCount = (counters.get(slotKey) || 0) + 1;
+        counters.set(slotKey, nextCount);
+        if (slot.maxFiles && nextCount > slot.maxFiles) {
+          return false;
+        }
+        return true;
+      });
+    });
+  }, [referenceSlots]);
 
   const config = useMemo(() => {
     switch (variant) {
@@ -1733,9 +1965,21 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
       async (event) => {
         const fileList = Array.from(event.target.files || []);
         if (fileList.length === 0) return;
+        const slotConfig = referenceSlots.find((item) => item.key === slot);
+        const currentSlotFiles = uploadedFiles.filter((file) => (file.slot || 'generic') === slot);
+        const remaining = slotConfig?.maxFiles
+          ? Math.max(0, slotConfig.maxFiles - currentSlotFiles.length)
+          : fileList.length;
+        if (remaining <= 0) {
+          setError(`${slotConfig?.label || '该上传项'}已达到上游允许数量`);
+          event.target.value = '';
+          return;
+        }
+
+        const effectiveFiles = slotConfig?.maxFiles ? fileList.slice(0, remaining) : fileList;
         try {
           const next = await Promise.all(
-            fileList.map(
+            effectiveFiles.map(
               (file) =>
                 new Promise<UploadedMedia>((resolve, reject) => {
                   const reader = new FileReader();
@@ -1763,7 +2007,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
           setError(uploadError instanceof Error ? uploadError.message : '读取上传文件失败');
         }
       },
-    []
+    [referenceSlots, uploadedFiles]
   );
 
   const handleRemoveUploadedFile = useCallback((target: UploadedMedia) => {
@@ -1800,7 +2044,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
           duration: effectiveDuration,
           prompt: taskPrompt,
           videoConfigObject,
-          files: uploadedFiles.map((file) => ({
+          files: sortUploadedFilesForSubmit(uploadedFiles).map((file) => ({
             mimeType: file.mimeType,
             data: file.data,
           })),
@@ -2082,7 +2326,9 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold text-white">{slot.label}</p>
                         <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-white/40">
-                          {slot.multiple ? '多文件' : '单文件'}
+                          {slot.maxFiles && slot.maxFiles > 1
+                            ? `最多 ${slot.maxFiles} 个`
+                            : slot.multiple ? '多文件' : '单文件'}
                         </span>
                       </div>
                       <p className="mt-1 text-xs leading-5 text-white/40">{slot.hint}</p>
@@ -2249,7 +2495,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
         </div>
       </section>
 
-      <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6">
+      <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
         <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-4 sm:gap-6">
@@ -2329,13 +2575,43 @@ export function TtsPage() {
   const [voicePrompt, setVoicePrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [audioUrl, setAudioUrl] = useState('');
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [generations, setGenerations] = useState<Generation[]>([]);
+  const [busyGenerationId, setBusyGenerationId] = useState<string | null>(null);
+  const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const [pending, recent] = await Promise.all([
+          fetchPendingGenerationTasks(100),
+          fetchRecentUserGenerations(50),
+        ]);
+        if (!mounted) return;
+        setTasks(filterTasksByKind(pending, 'audio').filter((task) => task.type === 'voice') as Task[]);
+        setGenerations(
+          filterGenerationsByKind(recent, 'audio').filter((generation) => generation.type === 'voice')
+        );
+      } catch (err) {
+        console.error('[TtsPage] load failed', err);
+      }
+    };
+
+    void load();
+    const id = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
 
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
     setLoading(true);
     setError('');
-    setAudioUrl('');
     try {
       const res = await fetch('/api/generate/voice', {
         method: 'POST',
@@ -2344,7 +2620,78 @@ export function TtsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '生成失败');
-      setAudioUrl(data.data?.url || '');
+
+      const taskId = data?.data?.id as string | undefined;
+      if (taskId) {
+        const createdAt = Date.now();
+        setTasks((prev) => replaceActiveTasks(prev, mergeTasksById(prev, [{
+          id: taskId,
+          prompt,
+          type: 'voice',
+          status: 'processing',
+          progress: 0,
+          model: 'TTS 语音',
+          createdAt,
+          updatedAt: createdAt,
+        } as Task])) as Task[]);
+
+        void pollGenerationTask({
+          taskId,
+          taskPrompt: prompt,
+          taskType: 'audio',
+          onProgress: (payload) => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: payload.id,
+              prompt,
+              type: payload.type,
+              status: payload.status === 'processing' ? 'processing' : 'pending',
+              progress: payload.progress,
+              model: String(payload.params?.model || 'TTS 语音'),
+              errorMessage: payload.errorMessage,
+              createdAt: payload.createdAt,
+              updatedAt: payload.updatedAt,
+              upstreamTaskId: typeof payload.params?.upstreamTaskId === 'string' ? payload.params.upstreamTaskId : undefined,
+              upstreamStatus: typeof payload.params?.upstreamStatus === 'string' ? payload.params.upstreamStatus : undefined,
+              upstreamState: typeof payload.params?.upstreamState === 'string' ? payload.params.upstreamState : undefined,
+              upstreamStatusGroup: typeof payload.params?.upstreamStatusGroup === 'string' ? payload.params.upstreamStatusGroup : undefined,
+              upstreamProgress: typeof payload.params?.upstreamProgress === 'number' ? payload.params.upstreamProgress : undefined,
+              upstreamUpdatedAt: typeof payload.params?.upstreamUpdatedAt === 'number' ? payload.params.upstreamUpdatedAt : undefined,
+            } as Task]) as Task[]);
+          },
+          onCompleted: async (generation) => {
+            setGenerations((prev) => mergeGenerationsById(prev, [generation]));
+            setTasks((prev) => prev.filter((task) => task.id !== generation.id));
+          },
+          onFailed: async (message, payload) => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: taskId,
+              prompt,
+              type: payload?.type || 'voice',
+              status: 'failed',
+              progress: payload?.progress,
+              model: String(payload?.params?.model || 'TTS 语音'),
+              errorMessage: message,
+              createdAt: payload?.createdAt || createdAt,
+              updatedAt: payload?.updatedAt || Date.now(),
+              upstreamTaskId: typeof payload?.params?.upstreamTaskId === 'string' ? payload.params.upstreamTaskId : undefined,
+              upstreamStatus: typeof payload?.params?.upstreamStatus === 'string' ? payload.params.upstreamStatus : undefined,
+              upstreamState: typeof payload?.params?.upstreamState === 'string' ? payload.params.upstreamState : undefined,
+            } as Task]) as Task[]);
+          },
+          onTimeout: async () => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: taskId,
+              prompt,
+              type: 'voice',
+              status: 'failed',
+              model: 'TTS 语音',
+              errorMessage: '轮询超时，请稍后在作品库查看',
+              createdAt,
+              updatedAt: Date.now(),
+            } as Task]) as Task[]);
+          },
+        });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成失败');
     } finally {
@@ -2352,11 +2699,49 @@ export function TtsPage() {
     }
   };
 
+  const handleRemoveTask = useCallback((taskId: string) => {
+    setTasks((prev) => prev.filter((task) => task.id !== taskId));
+  }, []);
+
+  const handleClearFailedTasks = useCallback(async () => {
+    setClearingFailedTasks(true);
+    try {
+      const failedIds = tasks.filter((task) => task.status === 'failed' || task.status === 'cancelled').map((task) => task.id);
+      if (failedIds.length > 0) {
+        await deleteGenerationRecords(failedIds);
+      }
+      setTasks((prev) => prev.filter((task) => task.status !== 'failed' && task.status !== 'cancelled'));
+    } catch (err) {
+      console.error('[TtsPage] clear failed tasks failed', err);
+    } finally {
+      setClearingFailedTasks(false);
+    }
+  }, [tasks]);
+
+  const handleRemoveGeneration = useCallback(async (generation: Generation) => {
+    setBusyGenerationId(generation.id);
+    try {
+      await deleteGenerationRecord(generation.id);
+      setGenerations((prev) => prev.filter((item) => item.id !== generation.id));
+    } catch (err) {
+      console.error('[TtsPage] delete generation failed', err);
+    } finally {
+      setBusyGenerationId(null);
+    }
+  }, []);
+
   return (
     <div className="space-y-4 pb-36">
       <LcPageTitle title="TTS语音" description="创建声音、TTS语音克隆、音色替换" />
-      <LcResultPanel emptyTitle={audioUrl ? '已生成语音' : '暂无生成结果'} emptyDescription={audioUrl ? '可在下方播放或下载' : '开始创作你的第一个语音作品'} />
-      {audioUrl ? <audio controls src={audioUrl} className="w-full" /> : null}
+      <ResultGallery
+        generations={generations}
+        tasks={tasks}
+        onRemoveTask={handleRemoveTask}
+        onClearFailedTasks={handleClearFailedTasks}
+        onRemoveGeneration={handleRemoveGeneration}
+        busyGenerationId={busyGenerationId}
+        clearingFailedTasks={clearingFailedTasks}
+      />
       <LcCard>
         <div className="space-y-5 p-5">
           <LcTabs
@@ -2400,6 +2785,36 @@ export function MusicPage() {
   const [advanced, setAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [generations, setGenerations] = useState<Generation[]>([]);
+  const [busyGenerationId, setBusyGenerationId] = useState<string | null>(null);
+  const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const [pending, recent] = await Promise.all([
+          fetchPendingGenerationTasks(100),
+          fetchRecentUserGenerations(50),
+        ]);
+        if (!mounted) return;
+        setTasks(filterTasksByKind(pending, 'audio') as Task[]);
+        setGenerations(filterGenerationsByKind(recent, 'audio'));
+      } catch (err) {
+        console.error('[MusicPage] load failed', err);
+      }
+    };
+
+    void load();
+    const id = window.setInterval(() => {
+      void load();
+    }, 15000);
+    return () => {
+      mounted = false;
+      window.clearInterval(id);
+    };
+  }, []);
 
   const handleGenerate = async () => {
     const prompt = [stylePrompt.trim(), lyrics.trim()].filter(Boolean).join('\n\n');
@@ -2414,12 +2829,115 @@ export function MusicPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '生成失败');
+
+      const taskId = data?.data?.id as string | undefined;
+      if (taskId) {
+        const createdAt = Date.now();
+        setTasks((prev) => replaceActiveTasks(prev, mergeTasksById(prev, [{
+          id: taskId,
+          prompt,
+          type: 'music',
+          status: 'processing',
+          progress: 0,
+          model,
+          createdAt,
+          updatedAt: createdAt,
+        } as Task])) as Task[]);
+
+        void pollGenerationTask({
+          taskId,
+          taskPrompt: prompt,
+          taskType: 'audio',
+          onProgress: (payload) => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: payload.id,
+              prompt,
+              type: payload.type,
+              status: payload.status === 'processing' ? 'processing' : 'pending',
+              progress: payload.progress,
+              model: String(payload.params?.model || model),
+              errorMessage: payload.errorMessage,
+              createdAt: payload.createdAt,
+              updatedAt: payload.updatedAt,
+              upstreamTaskId: typeof payload.params?.upstreamTaskId === 'string' ? payload.params.upstreamTaskId : undefined,
+              upstreamStatus: typeof payload.params?.upstreamStatus === 'string' ? payload.params.upstreamStatus : undefined,
+              upstreamState: typeof payload.params?.upstreamState === 'string' ? payload.params.upstreamState : undefined,
+              upstreamStatusGroup: typeof payload.params?.upstreamStatusGroup === 'string' ? payload.params.upstreamStatusGroup : undefined,
+              upstreamProgress: typeof payload.params?.upstreamProgress === 'number' ? payload.params.upstreamProgress : undefined,
+              upstreamUpdatedAt: typeof payload.params?.upstreamUpdatedAt === 'number' ? payload.params.upstreamUpdatedAt : undefined,
+            } as Task]) as Task[]);
+          },
+          onCompleted: async (generation) => {
+            setGenerations((prev) => mergeGenerationsById(prev, [generation]));
+            setTasks((prev) => prev.filter((task) => task.id !== generation.id));
+          },
+          onFailed: async (message, payload) => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: taskId,
+              prompt,
+              type: payload?.type || 'music',
+              status: 'failed',
+              progress: payload?.progress,
+              model: String(payload?.params?.model || model),
+              errorMessage: message,
+              createdAt: payload?.createdAt || createdAt,
+              updatedAt: payload?.updatedAt || Date.now(),
+              upstreamTaskId: typeof payload?.params?.upstreamTaskId === 'string' ? payload.params.upstreamTaskId : undefined,
+              upstreamStatus: typeof payload?.params?.upstreamStatus === 'string' ? payload.params.upstreamStatus : undefined,
+              upstreamState: typeof payload?.params?.upstreamState === 'string' ? payload.params.upstreamState : undefined,
+            } as Task]) as Task[]);
+          },
+          onTimeout: async () => {
+            setTasks((prev) => mergeTasksById(prev, [{
+              id: taskId,
+              prompt,
+              type: 'music',
+              status: 'failed',
+              model,
+              errorMessage: '轮询超时，请稍后在作品库查看',
+              createdAt,
+              updatedAt: Date.now(),
+            } as Task]) as Task[]);
+          },
+        });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成失败');
     } finally {
       setLoading(false);
     }
   };
+
+  const handleRemoveTask = useCallback((taskId: string) => {
+    setTasks((prev) => prev.filter((task) => task.id !== taskId));
+  }, []);
+
+  const handleClearFailedTasks = useCallback(async () => {
+    setClearingFailedTasks(true);
+    try {
+      const failedIds = tasks.filter((task) => task.status === 'failed' || task.status === 'cancelled').map((task) => task.id);
+      if (failedIds.length > 0) {
+        await deleteGenerationRecords(failedIds);
+      }
+      setTasks((prev) => prev.filter((task) => task.status !== 'failed' && task.status !== 'cancelled'));
+    } catch (err) {
+      console.error('[MusicPage] clear failed tasks failed', err);
+    } finally {
+      setClearingFailedTasks(false);
+    }
+  }, [tasks]);
+
+  const handleRemoveGeneration = useCallback(async (generation: Generation) => {
+    setBusyGenerationId(generation.id);
+    try {
+      await deleteGenerationRecord(generation.id);
+      setGenerations((prev) => prev.filter((item) => item.id !== generation.id));
+    } catch (err) {
+      console.error('[MusicPage] delete generation failed', err);
+    } finally {
+      setBusyGenerationId(null);
+    }
+  }, []);
 
   return (
     <div className="space-y-4 pb-36">
@@ -2477,21 +2995,15 @@ export function MusicPage() {
           {error ? <p className="text-sm text-red-300">{error}</p> : null}
         </div>
       </LcCard>
-      <LcCard>
-        <div className="border-b border-white/8 px-5 py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.03] text-white/90"><Clock3 className="h-4 w-4" /></div>
-            <div><p className="text-lg font-semibold text-white">任务列表</p><p className="text-xs text-white/45">0 个完成</p></div>
-          </div>
-        </div>
-        <div className="p-5">
-          <div className="flex min-h-[320px] flex-col items-center justify-center rounded-[24px] border border-dashed border-white/10 bg-[#0f1319] px-6 text-center">
-            <Clock3 className="mb-3 h-8 w-8 text-white/35" />
-            <p className="text-2xl font-medium text-white/75">暂无任务</p>
-            <p className="mt-2 text-sm text-white/35">提交后会在这里显示任务状态</p>
-          </div>
-        </div>
-      </LcCard>
+      <ResultGallery
+        generations={generations}
+        tasks={tasks}
+        onRemoveTask={handleRemoveTask}
+        onClearFailedTasks={handleClearFailedTasks}
+        onRemoveGeneration={handleRemoveGeneration}
+        busyGenerationId={busyGenerationId}
+        clearingFailedTasks={clearingFailedTasks}
+      />
 
       <FloatingGenerateBar
         costLabel="10 积分"
@@ -2636,6 +3148,8 @@ export function RechargePage() {
   const [paying, setPaying] = useState(false);
   const [redeeming, setRedeeming] = useState(false);
   const [message, setMessage] = useState('');
+  const currentMembershipLevel = getEffectiveMembershipLevel(session?.user);
+  const currentMembershipLabel = MEMBERSHIP_LABELS[currentMembershipLevel];
 
   useEffect(() => {
     const loadOrders = async () => {
@@ -2700,6 +3214,51 @@ export function RechargePage() {
           <p className="mt-1 text-sm text-white/45">积分余额与兑换比例</p>
           <div className="mt-5 rounded-2xl border border-[#274d38] bg-[#12271c] px-5 py-4 text-white/85">1 元 = <span className="text-3xl font-semibold text-[#8eedb2]">100</span> 积分</div>
           <div className="mt-5 text-5xl font-semibold tracking-[-0.04em] text-white">{session?.user?.balance ?? 50} <span className="text-lg font-normal text-white/45">积分</span></div>
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-[#3a2b53] bg-[#181225] px-4 py-2 text-sm text-[#e8d7ff]">
+            <Crown className="h-4 w-4" />
+            当前等级：{currentMembershipLabel}
+            {session?.user?.membershipExpiresAt && session.user.membershipExpiresAt > Date.now() ? (
+              <span className="text-xs text-[#cbb0ff]">
+                · 有效期至 {new Date(session.user.membershipExpiresAt).toLocaleDateString('zh-CN')}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </LcCard>
+      <LcCard>
+        <div className="border-b border-white/8 px-5 py-4">
+          <p className="text-2xl font-semibold text-white">会员定价表</p>
+          <p className="mt-1 text-sm text-white/45">按你给的表同步：SVIP 6 折，VIP 85 折，普通原价</p>
+        </div>
+        <div className="space-y-5 p-5">
+          <div className="grid gap-3 md:grid-cols-3">
+            {MEMBERSHIP_RECHARGE_TIERS.map((tier) => (
+              <div key={tier.level} className="rounded-[24px] border border-white/8 bg-[#0f1319] p-4 text-white/75">
+                <div className="text-sm font-semibold text-white">{tier.label}</div>
+                <div className="mt-2 text-2xl font-semibold text-[#8eedb2]">¥{tier.amount}</div>
+                <div className="mt-1 text-xs text-white/40">开通/顺延 {tier.days} 天</div>
+              </div>
+            ))}
+          </div>
+          <div className="overflow-hidden rounded-[24px] border border-white/8">
+            <div className="grid grid-cols-[1.5fr_repeat(4,minmax(0,1fr))] bg-white/[0.04] px-4 py-3 text-xs font-semibold text-white/55">
+              <div>模型</div>
+              <div>SVIP</div>
+              <div>VIP</div>
+              <div>普通</div>
+              <div>对应时长</div>
+            </div>
+            {PRICING_REFERENCE_ROWS.map((row) => (
+              <div key={row.label} className="grid grid-cols-[1.5fr_repeat(4,minmax(0,1fr))] border-t border-white/8 px-4 py-3 text-sm text-white/78">
+                <div>{row.label}</div>
+                <div>¥{row.prices.svip}/{row.unit}</div>
+                <div>¥{row.prices.vip}/{row.unit}</div>
+                <div>¥{row.prices.normal}/{row.unit}</div>
+                <div>{row.seconds || '-'}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-xs text-white/35">说明：站内仍按积分扣费，当前按 1 元 = 100 积分换算并四舍五入到整数积分。</div>
         </div>
       </LcCard>
       {message ? <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-white/75">{message}</div> : null}

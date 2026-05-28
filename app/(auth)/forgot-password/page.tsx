@@ -73,7 +73,7 @@ export default function ForgotPasswordPage() {
       <AnimatedBackground variant="auth" />
 
       <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-12">
-        <div className="w-full max-w-sm animate-rise space-y-8">
+        <div className="w-full max-w-sm space-y-8">
           <div className="text-center">
             <Link href="/" className="inline-flex flex-col items-center gap-4 group">
               <BrandMark

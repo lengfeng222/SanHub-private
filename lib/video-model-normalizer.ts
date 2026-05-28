@@ -15,11 +15,99 @@ type VideoModelWithChannel = {
 type VeoFamily = 'fast' | 'ultra' | 'ultra_relaxed' | 'lite' | 'standard';
 type FlowVeoKind = 't2v' | 'i2v' | 'r2v' | 'interpolation';
 type FlowVeoAspect = 'landscape' | 'portrait';
+type SupportedVideoBillingMode = Extract<NonNullable<VideoModel['billingMode']>, 'per_call' | 'per_second'>;
+type BillingCandidateObject = Record<string, unknown>;
+
+export type VideoBillingProfile = {
+  billingMode: SupportedVideoBillingMode;
+  billingPrice: number;
+  billingUnit: number;
+  inferredFrom: 'remote' | 'heuristic' | 'fallback';
+};
 
 const USER_VIDEO_DURATION_VALUE = '8s';
 const USER_VIDEO_DURATION_LABEL = '8 秒';
 
 const ASPECT_RATIO_ORDER = ['landscape', 'portrait', 'square', '16:9', '9:16', '1:1'];
+const BILLING_OBJECT_KEY_PATTERN = /(pricing|billing|price|cost|meta|detail|extra|capabilit)/i;
+const BILLING_MODE_KEYS = [
+  'billingMode',
+  'billing_mode',
+  'billingType',
+  'billing_type',
+  'chargeType',
+  'charge_type',
+  'pricingMode',
+  'pricing_mode',
+  'mode',
+  'unitType',
+  'unit_type',
+];
+const BILLING_PRICE_KEYS = [
+  'billingPrice',
+  'billing_price',
+  'price',
+  'cost',
+  'amount',
+  'credits',
+  'credit',
+  'fee',
+  'value',
+  'charge',
+];
+const BILLING_UNIT_KEYS = [
+  'billingUnit',
+  'billing_unit',
+  'unit',
+  'step',
+  'interval',
+  'block',
+  'seconds',
+  'durationUnit',
+  'duration_unit',
+];
+const BILLING_TEXT_KEYS = [
+  'description',
+  'summary',
+  'priceText',
+  'price_text',
+  'billingText',
+  'billing_text',
+  'pricingText',
+  'pricing_text',
+  'note',
+];
+const PER_SECOND_VALUE_KEYS = [
+  'price_per_second',
+  'billing_price_per_second',
+  'credits_per_second',
+  'credit_per_second',
+  'cost_per_second',
+  'per_second',
+  'pricePerSecond',
+  'billingPricePerSecond',
+  'creditsPerSecond',
+  'costPerSecond',
+];
+const PER_CALL_VALUE_KEYS = [
+  'price_per_call',
+  'billing_price_per_call',
+  'credits_per_call',
+  'credit_per_call',
+  'cost_per_call',
+  'per_call',
+  'pricePerCall',
+  'billingPricePerCall',
+  'creditsPerCall',
+  'costPerCall',
+  'price_per_generation',
+  'billing_price_per_generation',
+  'credits_per_generation',
+  'cost_per_generation',
+  'pricePerGeneration',
+  'creditsPerGeneration',
+  'costPerGeneration',
+];
 
 const VEO_31_MODEL_MATRIX: Record<
   VeoFamily,
@@ -144,6 +232,306 @@ export function getVeoGroupKey(apiModel: string, channelId = ''): string {
   return channelId ? `${channelId}:${key}` : key;
 }
 
+function toBillingCandidateObject(value: unknown): BillingCandidateObject | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as BillingCandidateObject;
+}
+
+function toRoundedNonNegativeInt(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return Math.round(parsed);
+}
+
+function toPositiveInt(value: unknown): number | undefined {
+  const parsed = toRoundedNonNegativeInt(value);
+  if (!parsed || parsed < 1) return undefined;
+  return parsed;
+}
+
+function normalizeBillingModeToken(value: unknown): SupportedVideoBillingMode | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return undefined;
+
+  if (
+    normalized === 'per_second' ||
+    normalized === 'per-second' ||
+    normalized === 'second' ||
+    normalized === 'seconds' ||
+    normalized === 'sec' ||
+    normalized === 'secs' ||
+    normalized === '按秒' ||
+    normalized === '每秒' ||
+    /\/\s*(sec|second|seconds|秒)\b/i.test(normalized) ||
+    /\bper\s*(sec|second|seconds)\b/i.test(normalized) ||
+    /每\s*\d*\s*秒/.test(normalized)
+  ) {
+    return 'per_second';
+  }
+
+  if (
+    normalized === 'per_call' ||
+    normalized === 'per-call' ||
+    normalized === 'call' ||
+    normalized === 'calls' ||
+    normalized === 'generation' ||
+    normalized === 'generations' ||
+    normalized === 'request' ||
+    normalized === 'requests' ||
+    normalized === 'task' ||
+    normalized === 'tasks' ||
+    normalized === '按次' ||
+    normalized === '每次' ||
+    /\/\s*(call|calls|generation|generations|request|requests|task|tasks|次)\b/i.test(normalized) ||
+    /\bper\s*(call|generation|request|task)\b/i.test(normalized) ||
+    /每\s*\d*\s*次/.test(normalized)
+  ) {
+    return 'per_call';
+  }
+
+  return undefined;
+}
+
+function parseBillingProfileFromText(text: string): Omit<VideoBillingProfile, 'inferredFrom'> | null {
+  const normalized = text.trim();
+  if (!normalized) return null;
+
+  const perSecondMatch = normalized.match(
+    /(\d+(?:\.\d+)?)\s*(?:credits?|积分)?\s*(?:\/|per\s*)(\d+(?:\.\d+)?)?\s*(?:sec|second|seconds|秒)/i
+  );
+  if (perSecondMatch) {
+    return {
+      billingMode: 'per_second',
+      billingPrice: Math.round(Number(perSecondMatch[1])),
+      billingUnit: Math.max(1, Math.round(Number(perSecondMatch[2] || 1))),
+    };
+  }
+
+  const perCallMatch = normalized.match(
+    /(\d+(?:\.\d+)?)\s*(?:credits?|积分)?\s*(?:\/|per\s*)(\d+(?:\.\d+)?)?\s*(?:call|calls|generation|generations|request|requests|task|tasks|次)/i
+  );
+  if (perCallMatch) {
+    return {
+      billingMode: 'per_call',
+      billingPrice: Math.round(Number(perCallMatch[1])),
+      billingUnit: Math.max(1, Math.round(Number(perCallMatch[2] || 1))),
+    };
+  }
+
+  const chineseModePriceMatch = normalized.match(/每\s*(\d+(?:\.\d+)?)?\s*(秒|次)[^\d]{0,8}(\d+(?:\.\d+)?)\s*积分/i);
+  if (chineseModePriceMatch) {
+    return {
+      billingMode: chineseModePriceMatch[2] === '秒' ? 'per_second' : 'per_call',
+      billingPrice: Math.round(Number(chineseModePriceMatch[3])),
+      billingUnit: Math.max(1, Math.round(Number(chineseModePriceMatch[1] || 1))),
+    };
+  }
+
+  return null;
+}
+
+function collectRemoteBillingCandidateObjects(root: BillingCandidateObject): BillingCandidateObject[] {
+  const queue: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  const results: BillingCandidateObject[] = [];
+  const seen = new Set<BillingCandidateObject>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+
+    const objectValue = toBillingCandidateObject(current.value);
+    if (objectValue) {
+      if (seen.has(objectValue)) continue;
+      seen.add(objectValue);
+      results.push(objectValue);
+
+      if (current.depth >= 2) continue;
+      for (const [key, value] of Object.entries(objectValue)) {
+        if (current.depth > 0 && !BILLING_OBJECT_KEY_PATTERN.test(key)) continue;
+        if (Array.isArray(value)) {
+          value.forEach((item) => queue.push({ value: item, depth: current.depth + 1 }));
+          continue;
+        }
+        queue.push({ value, depth: current.depth + 1 });
+      }
+    } else if (Array.isArray(current.value)) {
+      current.value.forEach((item) => queue.push({ value: item, depth: current.depth }));
+    }
+  }
+
+  return results;
+}
+
+function findNumericBillingValue(source: BillingCandidateObject, keys: string[]): number | undefined {
+  for (const key of keys) {
+    if (!(key in source)) continue;
+    const numeric = toRoundedNonNegativeInt(source[key]);
+    if (numeric !== undefined) return numeric;
+  }
+  return undefined;
+}
+
+function findPositiveBillingUnit(source: BillingCandidateObject, keys: string[]): number | undefined {
+  for (const key of keys) {
+    if (!(key in source)) continue;
+    const numeric = toPositiveInt(source[key]);
+    if (numeric !== undefined) return numeric;
+  }
+  return undefined;
+}
+
+function findStringBillingTexts(source: BillingCandidateObject): string[] {
+  const texts: string[] = [];
+  for (const key of BILLING_TEXT_KEYS) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) {
+      texts.push(value.trim());
+    }
+  }
+
+  for (const [key, value] of Object.entries(source)) {
+    if (!BILLING_OBJECT_KEY_PATTERN.test(key)) continue;
+    if (typeof value === 'string' && value.trim()) {
+      texts.push(value.trim());
+    }
+  }
+
+  return texts;
+}
+
+function extractRemoteBillingProfile(source: BillingCandidateObject): Omit<VideoBillingProfile, 'inferredFrom'> | null {
+  const perSecondPrice = findNumericBillingValue(source, PER_SECOND_VALUE_KEYS);
+  if (perSecondPrice !== undefined) {
+    return {
+      billingMode: 'per_second',
+      billingPrice: perSecondPrice,
+      billingUnit: findPositiveBillingUnit(source, BILLING_UNIT_KEYS) ?? 1,
+    };
+  }
+
+  const perCallPrice = findNumericBillingValue(source, PER_CALL_VALUE_KEYS);
+  if (perCallPrice !== undefined) {
+    return {
+      billingMode: 'per_call',
+      billingPrice: perCallPrice,
+      billingUnit: findPositiveBillingUnit(source, BILLING_UNIT_KEYS) ?? 1,
+    };
+  }
+
+  const billingMode =
+    BILLING_MODE_KEYS.map((key) => normalizeBillingModeToken(source[key])).find(Boolean) ||
+    BILLING_UNIT_KEYS.map((key) => normalizeBillingModeToken(source[key])).find(Boolean);
+  const billingPrice = findNumericBillingValue(source, BILLING_PRICE_KEYS);
+  const billingUnit = findPositiveBillingUnit(source, BILLING_UNIT_KEYS) ?? 1;
+
+  if (billingMode && billingPrice !== undefined) {
+    return {
+      billingMode,
+      billingPrice,
+      billingUnit,
+    };
+  }
+
+  const textProfile = findStringBillingTexts(source)
+    .map((text) => parseBillingProfileFromText(text))
+    .find(Boolean);
+  if (textProfile) return textProfile;
+
+  return null;
+}
+
+function inferHeuristicVideoBillingProfile(
+  channelType: VideoChannel['type'] | undefined,
+  apiModel: string | undefined,
+  fallback: Omit<VideoBillingProfile, 'inferredFrom'>
+): VideoBillingProfile {
+  const normalizedApiModel = (apiModel || '').trim().toLowerCase();
+
+  if (
+    channelType === 'apexerapi' ||
+    normalizedApiModel === 'sora' ||
+    normalizedApiModel === 'sora-2' ||
+    normalizedApiModel.startsWith('sora-video') ||
+    normalizedApiModel.startsWith('sora2')
+  ) {
+    return {
+      billingMode: 'per_call',
+      billingPrice: 96,
+      billingUnit: 1,
+      inferredFrom: 'heuristic',
+    };
+  }
+
+  if (
+    channelType === 'flow2api' ||
+    isVeoApiModel(apiModel) ||
+    normalizedApiModel.includes('veo')
+  ) {
+    return {
+      billingMode: 'per_second',
+      billingPrice: 12,
+      billingUnit: 1,
+      inferredFrom: 'heuristic',
+    };
+  }
+
+  return {
+    ...fallback,
+    inferredFrom: 'fallback',
+  };
+}
+
+export function inferVideoBillingProfile(params: {
+  channelType?: VideoChannel['type'];
+  apiModel?: string;
+  remoteModel?: BillingCandidateObject | null;
+  fallbackMode?: SupportedVideoBillingMode;
+  fallbackPrice?: number;
+  fallbackUnit?: number;
+}): VideoBillingProfile {
+  const fallback: Omit<VideoBillingProfile, 'inferredFrom'> = {
+    billingMode: params.fallbackMode || 'per_second',
+    billingPrice: params.fallbackPrice ?? 12,
+    billingUnit: Math.max(1, params.fallbackUnit ?? 1),
+  };
+
+  const remoteModel = params.remoteModel ? toBillingCandidateObject(params.remoteModel) : undefined;
+  if (remoteModel) {
+    const candidateObjects = collectRemoteBillingCandidateObjects(remoteModel);
+    for (const candidate of candidateObjects) {
+      const explicit = extractRemoteBillingProfile(candidate);
+      if (!explicit) continue;
+      return {
+        ...explicit,
+        inferredFrom: 'remote',
+      };
+    }
+  }
+
+  return inferHeuristicVideoBillingProfile(params.channelType, params.apiModel, fallback);
+}
+
+export function estimateVideoDurationCost(
+  durationValue: string | undefined,
+  billing: Pick<VideoBillingProfile, 'billingMode' | 'billingPrice' | 'billingUnit'>,
+  fallbackCost = 100
+): number {
+  const secondsMatch = String(durationValue || '').match(/(\d+)/);
+  const seconds = Math.max(1, Number(secondsMatch?.[1] || 8));
+  const billingUnit = Math.max(1, billing.billingUnit || 1);
+
+  if (billing.billingMode === 'per_second') {
+    return Math.ceil(seconds / billingUnit) * Math.max(0, billing.billingPrice || 0);
+  }
+
+  if (billing.billingMode === 'per_call') {
+    return Math.max(0, billing.billingPrice || 0);
+  }
+
+  return fallbackCost;
+}
+
 export function normalizeFlowVeoAspect(aspectRatio?: string): FlowVeoAspect {
   const normalized = (aspectRatio || '').trim().toLowerCase();
   if (normalized === 'portrait' || normalized === '9:16') return 'portrait';
@@ -207,6 +595,24 @@ function pickDurationCost(models: VideoModel[]): number {
   return first ? first.cost : 100;
 }
 
+function parseDurationSecondsFromValue(value?: string): number {
+  const matched = String(value || '').match(/(\d+)/);
+  return matched ? Math.max(1, Number.parseInt(matched[1], 10) || 8) : 8;
+}
+
+function getDefaultDurationValue(models: VideoModel[]): string {
+  const explicit = models
+    .map((model) => String(model.defaultDuration || '').trim())
+    .find(Boolean);
+  if (explicit) return explicit;
+
+  const firstDuration = models
+    .flatMap((model) => model.durations || [])
+    .map((duration) => String(duration.value || '').trim())
+    .find(Boolean);
+  return firstDuration || USER_VIDEO_DURATION_VALUE;
+}
+
 export function getUserFacingVideoDurations(models: VideoModel[]): VideoDuration[] {
   return [
     {
@@ -261,6 +667,7 @@ export function buildVideoModelDescription(params: {
 
 function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoModel {
   const aspectRatios = mergeVideoAspectRatios([model]);
+  const defaultDuration = getDefaultDurationValue([model]);
   return {
     id: model.id,
     channelId: model.channelId,
@@ -275,13 +682,18 @@ function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoMo
       : model.description,
     features: model.features,
     aspectRatios,
-    durations: getUserFacingVideoDurations([model]),
+    durations: Array.isArray(model.durations) && model.durations.length > 0
+      ? model.durations
+      : getUserFacingVideoDurations([model]),
     defaultAspectRatio: getDefaultAspectRatio(aspectRatios),
-    defaultDuration: USER_VIDEO_DURATION_VALUE,
+    defaultDuration,
     videoConfigObject: model.videoConfigObject
       ? {
           ...model.videoConfigObject,
-          video_length: 8,
+          video_length:
+            typeof model.videoConfigObject.video_length === 'number' && Number.isFinite(model.videoConfigObject.video_length)
+              ? model.videoConfigObject.video_length
+              : parseDurationSecondsFromValue(defaultDuration),
         }
       : undefined,
     highlight: model.highlight,
@@ -289,6 +701,10 @@ function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoMo
     billingMode: model.billingMode,
     billingPrice: model.billingPrice,
     billingUnit: model.billingUnit,
+    normalPrice: model.normalPrice,
+    vipPrice: model.vipPrice,
+    svipPrice: model.svipPrice,
+    pricingRules: model.pricingRules,
     imageUrl: model.imageUrl,
   };
 }
@@ -318,6 +734,10 @@ function toMergedVeoModel(models: VideoModel[], channel: VideoChannel): SafeVide
     billingMode: representative.billingMode,
     billingPrice: representative.billingPrice,
     billingUnit: representative.billingUnit,
+    normalPrice: representative.normalPrice,
+    vipPrice: representative.vipPrice,
+    svipPrice: representative.svipPrice,
+    pricingRules: representative.pricingRules,
     imageUrl: representative.imageUrl || models.find((model) => model.imageUrl)?.imageUrl,
   };
 }

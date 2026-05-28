@@ -8,6 +8,7 @@ import {
   X,
   Play,
   Image as ImageIcon,
+  Headphones,
   Sparkles,
   Loader2,
   AlertCircle,
@@ -79,7 +80,12 @@ export function ResultGallery({
       return;
     }
 
-    const extension = type.includes('video') ? 'mp4' : 'png';
+    const extension =
+      type === 'music' || type === 'voice'
+        ? 'mp3'
+        : type.includes('video')
+          ? 'mp4'
+          : 'png';
     try {
       await downloadAsset(url, `sanhub-${id}.${extension}`);
     } catch (err) {
@@ -93,9 +99,12 @@ export function ResultGallery({
   };
 
   const isVideo = (gen: Generation) => gen.type.includes('video');
+  const isAudio = (gen: Generation) => gen.type === 'music' || gen.type === 'voice';
   const canReuse = (gen: Generation) => !isVideo(gen) && typeof onReuseGeneration === 'function';
   const isTaskVideo = (task: Task) => task.type?.includes('video') || task.model?.includes('video');
+  const isTaskAudio = (task: Task) => task.type === 'music' || task.type === 'voice';
   const getTaskModelLabel = (task: Task) => {
+    if (isTaskAudio(task)) return task.model || (task.type === 'music' ? 'AI 音乐' : 'TTS 语音');
     if (!isTaskVideo(task)) return task.model || '';
     return resolveVideoModelLabel({
       modelId: task.modelId,
@@ -104,6 +113,12 @@ export function ResultGallery({
     });
   };
   const getGenerationModelLabel = (generation: Generation) => {
+    if (isAudio(generation)) {
+      return String(
+        generation.params?.model ||
+        (generation.type === 'music' ? 'AI 音乐' : 'TTS 语音')
+      );
+    }
     if (!isVideo(generation)) return String(generation.params?.model || '');
     return resolveVideoModelLabel({
       modelId: typeof generation.params?.modelId === 'string' ? generation.params.modelId : undefined,
@@ -253,6 +268,11 @@ export function ResultGallery({
                         <Play className="w-3 h-3 text-foreground" />
                         <span className="text-[10px] text-foreground">VIDEO</span>
                       </>
+                    ) : isTaskAudio(task) ? (
+                      <>
+                        <Headphones className="w-3 h-3 text-foreground" />
+                        <span className="text-[10px] text-foreground">AUDIO</span>
+                      </>
                     ) : (
                       <>
                         <ImageIcon className="w-3 h-3 text-foreground" />
@@ -365,6 +385,17 @@ export function ResultGallery({
                         <Play className="w-3 h-3 text-foreground" />
                       </div>
                     </>
+                  ) : isAudio(gen) ? (
+                    <>
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-violet-500/12 to-fuchsia-500/10 px-4 text-foreground/75">
+                        <Headphones className="h-8 w-8 text-foreground/60" />
+                        <audio controls src={gen.resultUrl} className="w-full max-w-[90%]" />
+                      </div>
+                      <div className="absolute top-2 left-2 px-2 py-1 bg-card/70 border border-border/70 backdrop-blur-sm rounded-md flex items-center gap-1">
+                        <span className="text-[10px] font-medium text-foreground">#{index + 1}</span>
+                        <Headphones className="w-3 h-3 text-foreground" />
+                      </div>
+                    </>
                   ) : (
                     <>
                       <img
@@ -472,6 +503,20 @@ export function ResultGallery({
                     autoPlay
                     loop
                   />
+                ) : isAudio(selected) ? (
+                  <div className="flex h-full w-full items-center justify-center rounded-xl border border-border/70 bg-gradient-to-br from-violet-500/12 to-fuchsia-500/10 p-6">
+                    <div className="w-full max-w-xl">
+                      <div className="mb-4 flex items-center justify-center">
+                        <Headphones className="h-10 w-10 text-foreground/60" />
+                      </div>
+                      <audio
+                        src={selected.resultUrl}
+                        className="w-full"
+                        controls
+                        autoPlay
+                      />
+                    </div>
+                  </div>
                 ) : (
                   <img
                     src={selected.resultUrl}

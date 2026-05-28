@@ -24,7 +24,6 @@ export default function RegisterPage() {
   const router = useRouter();
   const { data: session, status } = useSession();
   const siteConfig = useSiteConfig();
-  const [mounted, setMounted] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [emailCode, setEmailCode] = useState('');
@@ -42,10 +41,6 @@ export default function RegisterPage() {
   const defaultBalance = 50;
 
   useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  useEffect(() => {
     if (status === 'authenticated' && session) {
       router.replace('/supervideo');
     }
@@ -61,14 +56,6 @@ export default function RegisterPage() {
     const timer = window.setTimeout(() => setEmailCodeCooldown((value) => Math.max(0, value - 1)), 1000);
     return () => window.clearTimeout(timer);
   }, [emailCodeCooldown]);
-
-  if (!mounted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-foreground/50">加载中...</div>
-      </div>
-    );
-  }
 
   if (status === 'authenticated') {
     return (
@@ -172,7 +159,7 @@ export default function RegisterPage() {
       <AnimatedBackground variant="auth" />
 
       <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-10">
-        <div className="w-full max-w-sm animate-rise space-y-6">
+        <div className="w-full max-w-sm space-y-6">
           <div className="text-center">
             <Link href="/" className="inline-flex flex-col items-center gap-4 group">
               <BrandMark

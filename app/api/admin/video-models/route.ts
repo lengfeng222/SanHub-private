@@ -4,11 +4,13 @@ import { authOptions } from '@/lib/auth';
 import {
   getVideoModels,
   getVideoModel,
+  getVideoChannel,
   createVideoModel,
   updateVideoModel,
   deleteVideoModel,
 } from '@/lib/db';
-import type { VideoConfigObject } from '@/types';
+import { estimateVideoDurationCost, inferVideoBillingProfile } from '@/lib/video-model-normalizer';
+import type { VideoConfigObject, VideoPricingRule } from '@/types';
 
 function normalizeExtraParams(raw: unknown): Record<string, unknown> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
@@ -90,6 +92,58 @@ function normalizeVideoConfigObject(raw: unknown): VideoConfigObject | undefined
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
+function normalizeVideoPricingRules(raw: unknown): VideoPricingRule[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const source = item as Record<string, unknown>;
+      const toStringOrUndefined = (value: unknown) => {
+        if (typeof value !== 'string') return undefined;
+        const normalized = value.trim();
+        return normalized || undefined;
+      };
+      const toPrice = (value: unknown) => {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+        return Math.round(parsed);
+      };
+
+      const rule: VideoPricingRule = {
+        id: toStringOrUndefined(source.id) || `video_rule_${Date.now()}_${index}`,
+        label: toStringOrUndefined(source.label),
+        duration: toStringOrUndefined(source.duration),
+        aspectRatio: toStringOrUndefined(source.aspectRatio),
+        resolution: toStringOrUndefined(source.resolution),
+        qualityVersion: toStringOrUndefined(source.qualityVersion),
+        modelVersion: toStringOrUndefined(source.modelVersion),
+        version: toStringOrUndefined(source.version),
+        generationMode: toStringOrUndefined(source.generationMode),
+        offPeak: typeof source.offPeak === 'boolean' ? source.offPeak : undefined,
+        normalPrice: toPrice(source.normalPrice),
+        vipPrice: toPrice(source.vipPrice),
+        svipPrice: toPrice(source.svipPrice),
+        enabled: source.enabled !== false,
+      };
+
+      const hasCondition = Boolean(
+        rule.duration
+        || rule.aspectRatio
+        || rule.resolution
+        || rule.qualityVersion
+        || rule.modelVersion
+        || rule.version
+        || rule.generationMode
+        || typeof rule.offPeak === 'boolean'
+      );
+      const hasPrice = Boolean(rule.normalPrice || rule.vipPrice || rule.svipPrice);
+
+      return hasCondition && hasPrice ? rule : null;
+    })
+    .filter((item): item is VideoPricingRule => Boolean(item));
+}
+
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
@@ -121,12 +175,45 @@ export async function POST(request: NextRequest) {
     const {
       channelId, name, description, apiModel, baseUrl, apiKey,
       features, aspectRatios, durations,
-      defaultAspectRatio, defaultDuration, videoConfigObject, highlight, enabled, billingMode, billingPrice, billingUnit, imageUrl, sortOrder,
+      defaultAspectRatio, defaultDuration, videoConfigObject, highlight, enabled, billingMode, billingPrice, billingUnit,
+      normalPrice, vipPrice, svipPrice, pricingRules, imageUrl, sortOrder,
     } = body;
 
     if (!channelId || !name || !apiModel) {
       return NextResponse.json({ error: '渠道、名称和模型 ID 必填' }, { status: 400 });
     }
+
+    const channel = await getVideoChannel(channelId);
+    if (!channel) {
+      return NextResponse.json({ error: '渠道不存在' }, { status: 404 });
+    }
+
+    const inferredBilling = inferVideoBillingProfile({
+      channelType: channel.type,
+      apiModel,
+      fallbackMode: 'per_second',
+      fallbackPrice: 12,
+      fallbackUnit: 1,
+    });
+    const resolvedBillingMode = billingMode ?? inferredBilling.billingMode;
+    const resolvedBillingPrice = billingPrice ?? inferredBilling.billingPrice;
+    const resolvedBillingUnit = billingUnit ?? inferredBilling.billingUnit;
+    const resolvedDefaultDuration = defaultDuration || '8s';
+    const resolvedDurations = durations || [
+      {
+        value: resolvedDefaultDuration,
+        label: resolvedDefaultDuration.replace(/^(\d+)s$/i, '$1 秒'),
+        cost: estimateVideoDurationCost(
+          resolvedDefaultDuration,
+          {
+            billingMode: resolvedBillingMode,
+            billingPrice: resolvedBillingPrice,
+            billingUnit: resolvedBillingUnit,
+          },
+          100
+        ),
+      },
+    ];
 
     const model = await createVideoModel({
       channelId,
@@ -145,17 +232,19 @@ export async function POST(request: NextRequest) {
         { value: 'landscape', label: '16:9' },
         { value: 'portrait', label: '9:16' },
       ],
-      durations: durations || [
-        { value: '8s', label: '8 秒', cost: 100 },
-      ],
+      durations: resolvedDurations,
       defaultAspectRatio: defaultAspectRatio || 'landscape',
-      defaultDuration: defaultDuration || '8s',
+      defaultDuration: resolvedDefaultDuration,
       videoConfigObject: normalizeVideoConfigObject(videoConfigObject),
       highlight: highlight || false,
       enabled: enabled !== false,
-      billingMode: billingMode || 'per_second',
-      billingPrice: billingPrice ?? 12,
-      billingUnit: billingUnit || 1,
+      billingMode: resolvedBillingMode,
+      billingPrice: resolvedBillingPrice,
+      billingUnit: resolvedBillingUnit,
+      normalPrice: normalPrice ?? undefined,
+      vipPrice: vipPrice ?? undefined,
+      svipPrice: svipPrice ?? undefined,
+      pricingRules: normalizeVideoPricingRules(pricingRules),
       imageUrl: imageUrl || undefined,
       sortOrder: sortOrder || 0,
     });
@@ -199,6 +288,12 @@ export async function PUT(request: NextRequest) {
     if (Object.prototype.hasOwnProperty.call(updates, 'videoConfigObject')) {
       normalizedUpdates.videoConfigObject = normalizeVideoConfigObject(
         (updates as { videoConfigObject?: unknown }).videoConfigObject
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'pricingRules')) {
+      normalizedUpdates.pricingRules = normalizeVideoPricingRules(
+        (updates as { pricingRules?: unknown }).pricingRules
       );
     }
 

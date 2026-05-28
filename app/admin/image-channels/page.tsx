@@ -6,7 +6,7 @@ import {
   Layers, ChevronDown, ChevronUp, Image as ImageIcon, RefreshCw, Download, Check
 } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
-import type { ImageChannel, ImageModel, ImageModelFeatures } from '@/types';
+import type { ImageChannel, ImageModel, ImageModelFeatures, ImagePricingRule } from '@/types';
 import { formatBillingSummary } from '@/lib/billing';
 
 const CHANNEL_TYPES = [
@@ -167,9 +167,74 @@ type ModelFormState = {
   billingMode: 'per_call' | 'per_second';
   billingPrice: number;
   billingUnit: number;
+  normalPrice: number;
+  vipPrice: number;
+  svipPrice: number;
+  pricingRules: ImagePricingRule[];
   imageUrl: string;
   sortOrder: number;
 };
+
+type PricingRuleDraft = {
+  id: string;
+  label: string;
+  imageSize: string;
+  aspectRatio: string;
+  quality: string;
+  normalPrice: number;
+  vipPrice: number;
+  svipPrice: number;
+  enabled: boolean;
+};
+
+function createImagePricingRuleDraft(): PricingRuleDraft {
+  return {
+    id: `rule_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: '',
+    imageSize: '',
+    aspectRatio: '',
+    quality: '',
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    enabled: true,
+  };
+}
+
+function mapImagePricingRulesToDrafts(rules?: ImagePricingRule[]): PricingRuleDraft[] {
+  if (!Array.isArray(rules) || rules.length === 0) return [];
+  return rules.map((rule, index) => ({
+    id: rule.id || `rule_${Date.now()}_${index}`,
+    label: rule.label || '',
+    imageSize: rule.imageSize || '',
+    aspectRatio: rule.aspectRatio || '',
+    quality: rule.quality || '',
+    normalPrice: Number(rule.normalPrice) || 0,
+    vipPrice: Number(rule.vipPrice) || 0,
+    svipPrice: Number(rule.svipPrice) || 0,
+    enabled: rule.enabled !== false,
+  }));
+}
+
+function normalizeImagePricingRules(rules: PricingRuleDraft[]): ImagePricingRule[] {
+  return rules
+    .map((rule) => ({
+      id: rule.id,
+      label: rule.label.trim() || undefined,
+      imageSize: rule.imageSize.trim() || undefined,
+      aspectRatio: rule.aspectRatio.trim() || undefined,
+      quality: rule.quality.trim() || undefined,
+      normalPrice: Number(rule.normalPrice) > 0 ? Number(rule.normalPrice) : undefined,
+      vipPrice: Number(rule.vipPrice) > 0 ? Number(rule.vipPrice) : undefined,
+      svipPrice: Number(rule.svipPrice) > 0 ? Number(rule.svipPrice) : undefined,
+      enabled: rule.enabled,
+    }))
+    .filter((rule) => {
+      const hasCondition = Boolean(rule.imageSize || rule.aspectRatio || rule.quality);
+      const hasPrice = Boolean(rule.normalPrice || rule.vipPrice || rule.svipPrice);
+      return hasCondition && hasPrice;
+    });
+}
 
 const ORIGINAL_IMAGE_ROWS: RatioResolutionRow[] = [{ ratio: 'original', resolution: '' }];
 
@@ -326,6 +391,10 @@ function createEmptyModelForm(): ModelFormState {
     billingMode: 'per_call',
     billingPrice: 10,
     billingUnit: 1,
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    pricingRules: [],
     imageUrl: '',
     sortOrder: 0,
   };
@@ -488,6 +557,8 @@ export default function ImageChannelsPage() {
   const [modelForm, setModelForm] = useState<ModelFormState>(() => createEmptyModelForm());
   const [ratioRows, setRatioRows] = useState<RatioResolutionRow[]>(() => cloneRatioRows(DEFAULT_RATIO_ROWS));
   const [sizeGroups, setSizeGroups] = useState<SizeResolutionGroup[]>(() => createDefaultSizeGroups());
+  const [pricingRuleDrafts, setPricingRuleDrafts] = useState<PricingRuleDraft[]>([]);
+  const [showAdvancedPricing, setShowAdvancedPricing] = useState(false);
 
   const currentEditableChannel = useMemo(
     () => channels.find((channel) => channel.id === modelChannelId) || null,
@@ -603,6 +674,8 @@ export default function ImageChannelsPage() {
     setModelForm(createEmptyModelForm());
     setRatioRows(cloneRatioRows(DEFAULT_RATIO_ROWS));
     setSizeGroups(createDefaultSizeGroups());
+    setPricingRuleDrafts([]);
+    setShowAdvancedPricing(false);
     setEditingModel(null);
     setModelChannelId(null);
     setActiveModelPresetId(null);
@@ -708,6 +781,10 @@ export default function ImageChannelsPage() {
       billingMode: (model.billingMode as 'per_call' | 'per_second') || 'per_call',
       billingPrice: model.billingPrice || model.costPerGeneration || 10,
       billingUnit: model.billingUnit || 1,
+      normalPrice: model.normalPrice || 0,
+      vipPrice: model.vipPrice || 0,
+      svipPrice: model.svipPrice || 0,
+      pricingRules: model.pricingRules || [],
       imageUrl: model.imageUrl || '',
       sortOrder: model.sortOrder,
     });
@@ -722,6 +799,8 @@ export default function ImageChannelsPage() {
       setRatioRows(buildRatioRows(model.resolutions as Record<string, string>));
       setSizeGroups(createDefaultSizeGroups());
     }
+    setPricingRuleDrafts(mapImagePricingRulesToDrafts(model.pricingRules));
+    setShowAdvancedPricing((model.normalPrice || model.vipPrice || model.svipPrice || 0) > 0 || (Array.isArray(model.pricingRules) && model.pricingRules.length > 0));
     setEditingModel(model.id);
     setModelChannelId(model.channelId);
     setActiveModelPresetId(null);
@@ -739,6 +818,8 @@ export default function ImageChannelsPage() {
     });
     setRatioRows(cloneRatioRows(preset.ratioRows));
     setSizeGroups(cloneSizeGroups(preset.sizeGroups));
+    setPricingRuleDrafts([]);
+    setShowAdvancedPricing(false);
     setEditingModel(null);
     setModelChannelId(channelId);
     setActiveModelPresetId(presetId);
@@ -887,6 +968,10 @@ export default function ImageChannelsPage() {
         billingMode: modelForm.billingMode,
         billingPrice: modelForm.billingPrice,
         billingUnit: modelForm.billingUnit,
+        normalPrice: modelForm.normalPrice || undefined,
+        vipPrice: modelForm.vipPrice || undefined,
+        svipPrice: modelForm.svipPrice || undefined,
+        pricingRules: normalizeImagePricingRules(pricingRuleDrafts),
         imageUrl: modelForm.imageUrl || undefined,
         sortOrder: modelForm.sortOrder,
       };
@@ -1410,46 +1495,216 @@ export default function ImageChannelsPage() {
                 </div>
               ) : null}
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">兼容旧积分字段</label>
-              <input
-                type="number"
-                value={modelForm.costPerGeneration}
-                onChange={(e) => setModelForm({ ...modelForm, costPerGeneration: parseInt(e.target.value) || 10 })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              />
+          </div>
+
+          <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4 space-y-4">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-sm font-medium text-foreground">基础定价</div>
+                <p className="text-xs text-foreground/50">默认只需要设置按次或按秒，以及基础价格。图片模型一般这样就够用。</p>
+              </div>
+              <div className="rounded-full border border-sky-400/20 bg-card/70 px-4 py-2 text-sm text-sky-300">
+                当前：{formatBillingSummary({
+                  billingMode: modelForm.billingMode,
+                  billingPrice: modelForm.billingPrice,
+                  billingUnit: modelForm.billingUnit,
+                  legacyCost: modelForm.costPerGeneration,
+                })}
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">计费方式</label>
-              <select
-                value={modelForm.billingMode}
-                onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              >
-                <option value="per_call" className="bg-card/95">按次</option>
-                <option value="per_second" className="bg-card/95">按秒</option>
-              </select>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">兼容旧积分字段</label>
+                <input
+                  type="number"
+                  value={modelForm.costPerGeneration}
+                  onChange={(e) => setModelForm({ ...modelForm, costPerGeneration: parseInt(e.target.value) || 10 })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">计费方式</label>
+                <select
+                  value={modelForm.billingMode}
+                  onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                >
+                  <option value="per_call" className="bg-card/95">按次</option>
+                  <option value="per_second" className="bg-card/95">按秒</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">价格</label>
+                <input
+                  type="number"
+                  value={modelForm.billingPrice}
+                  onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 10 })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">{modelForm.billingMode === 'per_second' ? '每多少秒' : '每多少张'}</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={modelForm.billingUnit}
+                  onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">计费价格</label>
-              <input
-                type="number"
-                value={modelForm.billingPrice}
-                onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 10 })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">{modelForm.billingMode === 'per_second' ? '每多少秒' : '计费单位'}</label>
-              <input
-                type="number"
-                min="1"
-                value={modelForm.billingUnit}
-                onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              />
+
+            <div className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium text-foreground">会员价格</div>
+                  <p className="text-xs text-foreground/45">不填就按基础定价计算。需要区分会员时再填。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedPricing((prev) => !prev)}
+                  className="rounded-full border border-border/70 px-3 py-1.5 text-xs text-foreground/70 hover:text-foreground"
+                >
+                  {showAdvancedPricing ? '收起高级定价' : '展开高级定价'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">普通价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.normalPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, normalPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">VIP 价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.vipPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, vipPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">SVIP 价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.svipPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, svipPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                  />
+                </div>
+              </div>
             </div>
           </div>
+
+          {showAdvancedPricing && (
+          <div className="space-y-3 rounded-2xl border border-border/60 bg-card/40 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-foreground">高级定价规则</div>
+                <p className="text-xs text-foreground/45">按图片尺寸 / 比例 / 质量单独覆盖普通、VIP、SVIP 价格。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPricingRuleDrafts((prev) => [...prev, createImagePricingRuleDraft()])}
+                className="rounded-lg border border-border/70 px-3 py-1.5 text-xs text-foreground/70 hover:text-foreground"
+              >
+                添加规则
+              </button>
+            </div>
+
+            {pricingRuleDrafts.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/60 px-4 py-5 text-center text-sm text-foreground/35">
+                暂无规则，未命中时会使用上面的模型默认三档价格
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {pricingRuleDrafts.map((rule, index) => (
+                  <div key={rule.id} className="grid grid-cols-1 gap-3 rounded-xl border border-border/60 bg-card/50 p-3 md:grid-cols-8">
+                    <input
+                      type="text"
+                      value={rule.label}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, label: e.target.value } : item))}
+                      placeholder="规则名，如 2K 方图"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border md:col-span-2"
+                    />
+                    <input
+                      type="text"
+                      value={rule.imageSize}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, imageSize: e.target.value } : item))}
+                      placeholder="1K / 2K / 4K"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.aspectRatio}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, aspectRatio: e.target.value } : item))}
+                      placeholder="1:1 / 16:9"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.quality}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, quality: e.target.value } : item))}
+                      placeholder="high / medium"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.normalPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, normalPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="普通价"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.vipPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, vipPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="VIP"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.svipPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, svipPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="SVIP"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <div className="flex items-center justify-between md:col-span-8">
+                      <label className="flex items-center gap-2 text-xs text-foreground/60">
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled}
+                          onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, enabled: e.target.checked } : item))}
+                          className="rounded border-border/70 bg-card/60"
+                        />
+                        启用此规则
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setPricingRuleDrafts((prev) => prev.filter((item) => item.id !== rule.id))}
+                        className="rounded-lg px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/10"
+                      >
+                        删除规则
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          )}
 
           {!modelForm.features.imageSize && (
             <div className="space-y-3">

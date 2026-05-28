@@ -8,7 +8,7 @@ import {
   type TaskType,
 } from './polling-utils';
 
-export type GenerationFeedKind = 'all' | 'image' | 'video';
+export type GenerationFeedKind = 'all' | 'image' | 'video' | 'audio';
 
 export type PendingGenerationTask = {
   id: string;
@@ -68,6 +68,10 @@ export function isVideoGenerationType(type?: string): boolean {
 
 export function isImageGenerationType(type?: string): boolean {
   return Boolean(type && !isVideoGenerationType(type) && type.endsWith('-image'));
+}
+
+export function isAudioGenerationType(type?: string): boolean {
+  return type === 'music' || type === 'voice';
 }
 
 export async function fetchGenerationSubmit(
@@ -135,11 +139,11 @@ export function filterGenerationsByKind(
   kind: GenerationFeedKind
 ): Generation[] {
   if (kind === 'all') return generations;
-  return generations.filter((generation) =>
-    kind === 'video'
-      ? isVideoGenerationType(generation.type)
-      : isImageGenerationType(generation.type)
-  );
+  return generations.filter((generation) => {
+    if (kind === 'video') return isVideoGenerationType(generation.type);
+    if (kind === 'audio') return isAudioGenerationType(generation.type);
+    return isImageGenerationType(generation.type);
+  });
 }
 
 export function filterTasksByKind(
@@ -147,9 +151,11 @@ export function filterTasksByKind(
   kind: GenerationFeedKind
 ): PendingGenerationTask[] {
   if (kind === 'all') return tasks;
-  return tasks.filter((task) =>
-    kind === 'video' ? isVideoGenerationType(task.type) : isImageGenerationType(task.type)
-  );
+  return tasks.filter((task) => {
+    if (kind === 'video') return isVideoGenerationType(task.type);
+    if (kind === 'audio') return isAudioGenerationType(task.type);
+    return isImageGenerationType(task.type);
+  });
 }
 
 export function mergeGenerationsById(

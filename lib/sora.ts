@@ -12,6 +12,19 @@ type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 type GenerationProgressMeta = Record<string, unknown>;
 type GenerationProgressCallback = (progress: number, meta?: GenerationProgressMeta) => void | Promise<void>;
 
+export type LingkeMediaVideoTaskSnapshot = {
+  taskId: string;
+  code: number;
+  status: string;
+  state: 'pending' | 'processing' | 'completed' | 'failed' | '';
+  statusGroup: 'pending' | 'processing' | 'completed' | 'failed' | 'timeout';
+  progress: number;
+  message?: string;
+  resultUrl?: string;
+  final: boolean;
+  raw: unknown;
+};
+
 const LOG_LEVELS: Record<LogLevel, number> = {
   debug: 10,
   info: 20,
@@ -350,6 +363,11 @@ function extractVideoUrlFromUnknownPayload(payload: unknown, baseUrl?: string): 
   return null;
 }
 
+function clampLingkeProgress(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function resolveLingkeStatusGroup(status: string, hasResult: boolean): string {
   if (hasResult) return 'completed';
 
@@ -383,6 +401,7 @@ function normalizeLingkeStatus(status: string): 'pending' | 'processing' | 'comp
     normalized.includes('error') ||
     normalized.includes('cancel') ||
     normalized.includes('失败') ||
+    normalized.includes('错误') ||
     normalized.includes('取消') ||
     normalized.includes('异常')
   ) {
@@ -415,6 +434,73 @@ function normalizeLingkeStatus(status: string): 'pending' | 'processing' | 'comp
   }
 
   return 'processing';
+}
+
+function buildLingkeVideoTaskSnapshot(
+  taskId: string,
+  data: any,
+  baseUrl?: string
+): LingkeMediaVideoTaskSnapshot {
+  const directUrl = extractVideoUrlFromUnknownPayload(data, baseUrl)
+    || (typeof data?.data?.result_url === 'string' ? data.data.result_url : null)
+    || (typeof data?.result_url === 'string' ? data.result_url : null);
+  const statusLabel = String(data?.data?.status || data?.status || '').trim();
+  const message = extractLingkeTaskMessage(data);
+  const state = normalizeLingkeStatus(
+    String(data?.data?.state || data?.state || '').trim() || statusLabel || message || ''
+  );
+  const numericProgress = Number(
+    data?.data?.progress
+      ?? data?.progress
+      ?? data?.data?.percentage
+      ?? data?.percentage
+      ?? NaN
+  );
+
+  let progress = Number.isFinite(numericProgress)
+    ? clampLingkeProgress(numericProgress)
+    : 0;
+
+  if (!progress) {
+    if (directUrl) progress = 100;
+    else if (state === 'pending') progress = 10;
+    else if (state === 'processing') progress = 60;
+    else if (state === 'failed') progress = 0;
+  }
+
+  return {
+    taskId,
+    code: Number(data?.code ?? 0),
+    status: statusLabel || message || '',
+    state,
+    statusGroup: resolveLingkeStatusGroup(statusLabel || message || '', Boolean(directUrl)) as LingkeMediaVideoTaskSnapshot['statusGroup'],
+    progress,
+    message,
+    resultUrl: directUrl || undefined,
+    final: Boolean(directUrl) || Boolean(data?.is_final || data?.data?.is_final),
+    raw: data,
+  };
+}
+
+export async function fetchLingkeMediaVideoTaskSnapshot(
+  baseUrl: string,
+  apiKey: string,
+  taskId: string
+): Promise<LingkeMediaVideoTaskSnapshot> {
+  const statusUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/status?task_id=${encodeURIComponent(taskId)}`;
+  const statusResponse = await fetchWithRetry(undiciFetch, statusUrl, () => ({
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  }));
+
+  const statusData: any = await statusResponse.json().catch(() => ({}));
+  if (!statusResponse.ok) {
+    throw new Error(`灵刻媒体查询失败 (${statusResponse.status})`);
+  }
+
+  return buildLingkeVideoTaskSnapshot(taskId, statusData, baseUrl);
 }
 
 function parseSseDataEvents(rawText: string): string[] {
@@ -917,8 +1003,10 @@ type LingkeRuntimeConfig = {
   videoUploadParamNames: string[];
   upstreamParamNames: string[];
   submitOnlyUpstreamParams: boolean;
+  defaultDynamicParamValues: Record<string, unknown>;
   aspectRatioParamName?: string;
   generationModeParamName?: string;
+  durationParamName?: string;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -937,16 +1025,26 @@ function normalizeLingkeInputModeValue(value: unknown): LingkeInputMode | null {
   switch (normalized) {
     case 'text':
     case 'reference':
+    case 'reference_images':
     case 'first_frame':
     case 'first_last_frame':
     case 'video_reference':
     case 'video_continue':
     case 'video_edit':
     case 'motion_control':
+      if (normalized === 'reference_images') return 'reference';
       return normalized;
     default:
       return null;
   }
+}
+
+function sanitizeLingkeDynamicDefaults(value: unknown): Record<string, unknown> {
+  if (!isPlainObject(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)
+  );
 }
 
 function getLingkeModelRuntimeConfig(model: VideoModel, modelName: string): LingkeRuntimeConfig {
@@ -964,7 +1062,10 @@ function getLingkeModelRuntimeConfig(model: VideoModel, modelName: string): Ling
     imageUploadParamNames: toStringArray(extraParams.image_upload_param_names),
     videoUploadParamNames: toStringArray(extraParams.video_upload_param_names),
     upstreamParamNames: toStringArray(extraParams.upstream_param_names),
-    submitOnlyUpstreamParams: extraParams.submit_only_upstream_params === true,
+    submitOnlyUpstreamParams:
+      extraParams.submit_only_upstream_params === true
+      || toStringArray(extraParams.upstream_param_names).length > 0,
+    defaultDynamicParamValues: sanitizeLingkeDynamicDefaults(extraParams.default_dynamic_param_values),
     aspectRatioParamName:
       typeof extraParams.aspect_ratio_param_name === 'string' && extraParams.aspect_ratio_param_name.trim()
         ? extraParams.aspect_ratio_param_name.trim()
@@ -973,7 +1074,143 @@ function getLingkeModelRuntimeConfig(model: VideoModel, modelName: string): Ling
       typeof extraParams.generation_mode_param_name === 'string' && extraParams.generation_mode_param_name.trim()
         ? extraParams.generation_mode_param_name.trim()
         : undefined,
+    durationParamName:
+      typeof extraParams.duration_param_name === 'string' && extraParams.duration_param_name.trim()
+        ? extraParams.duration_param_name.trim()
+        : undefined,
   };
+}
+
+function isMeaningfulLingkeParamValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+function buildLingkeAllowedParamNames(runtimeConfig: LingkeRuntimeConfig): Set<string> {
+  const allowed = new Set<string>(runtimeConfig.upstreamParamNames);
+  if (runtimeConfig.aspectRatioParamName) {
+    allowed.add(runtimeConfig.aspectRatioParamName);
+  }
+  if (runtimeConfig.generationModeParamName) {
+    allowed.add(runtimeConfig.generationModeParamName);
+  }
+  if (runtimeConfig.durationParamName) {
+    allowed.add(runtimeConfig.durationParamName);
+  }
+  return allowed;
+}
+
+function applyLingkeRuntimeDefaults(
+  params: Record<string, unknown>,
+  runtimeConfig: LingkeRuntimeConfig
+): Record<string, unknown> {
+  if (!isPlainObject(params)) return params;
+  if (!isPlainObject(runtimeConfig.defaultDynamicParamValues) || Object.keys(runtimeConfig.defaultDynamicParamValues).length === 0) {
+    return params;
+  }
+
+  const merged = { ...params };
+  for (const [key, value] of Object.entries(runtimeConfig.defaultDynamicParamValues)) {
+    if (!isMeaningfulLingkeParamValue(merged[key])) {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function filterLingkeUpstreamParams(
+  params: Record<string, unknown>,
+  runtimeConfig: LingkeRuntimeConfig
+): Record<string, unknown> {
+  if (!runtimeConfig.submitOnlyUpstreamParams || runtimeConfig.upstreamParamNames.length === 0) {
+    return params;
+  }
+
+  const allowed = buildLingkeAllowedParamNames(runtimeConfig);
+  return Object.fromEntries(
+    Object.entries(params).filter(([key, value]) => allowed.has(key) && isMeaningfulLingkeParamValue(value))
+  );
+}
+
+function resolveNearestAllowedDuration(
+  requestedLength: number,
+  allowedDurations: number[],
+  fallbackLength: number
+): number {
+  const normalizedAllowed = Array.from(
+    new Set(
+      allowedDurations
+        .map((value) => Math.floor(Number(value)))
+        .filter((value) => Number.isFinite(value) && value > 0)
+    )
+  ).sort((a, b) => a - b);
+
+  if (normalizedAllowed.length === 0) {
+    return fallbackLength;
+  }
+
+  if (normalizedAllowed.includes(requestedLength)) {
+    return requestedLength;
+  }
+
+  const greaterOrEqual = normalizedAllowed.find((value) => value >= requestedLength);
+  if (greaterOrEqual) return greaterOrEqual;
+  return normalizedAllowed[normalizedAllowed.length - 1] || fallbackLength;
+}
+
+function resolveLingkeRequestedDuration(
+  requestedLength: number,
+  model: VideoModel,
+  runtimeConfig: LingkeRuntimeConfig
+): number {
+  const durationCandidates = Array.isArray(model.durations)
+    ? model.durations.map((duration) => normalizeDurationSeconds(duration.value))
+    : [];
+  const fallbackDuration =
+    normalizeDurationSeconds(String(runtimeConfig.defaultDynamicParamValues.duration || ''))
+    || normalizeDurationSeconds(model.defaultDuration)
+    || Math.max(1, requestedLength);
+
+  return resolveNearestAllowedDuration(
+    Math.max(1, requestedLength),
+    durationCandidates,
+    fallbackDuration
+  );
+}
+
+function extractLingkeTaskMessage(data: any): string | undefined {
+  const directCandidates = [
+    data?.data?.error,
+    data?.data?.msg,
+    data?.data?.message,
+    data?.error,
+    data?.msg,
+    data?.message,
+  ];
+
+  for (const candidate of directCandidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  const extracted =
+    extractUpstreamErrorMessage(data?.data)
+    || extractUpstreamErrorMessage(data);
+  if (extracted) return extracted;
+
+  try {
+    const rawError = data?.data?.error ?? data?.error;
+    if (rawError !== undefined) {
+      return compactSnippet(JSON.stringify(rawError), 320);
+    }
+  } catch {
+    // ignore stringify failure
+  }
+
+  return undefined;
 }
 
 function extractLingkeRuntimeExtraParams(extraParams?: Record<string, unknown>): Record<string, unknown> {
@@ -1120,27 +1357,8 @@ function sanitizeLingkeUploadParams(
     }
   }
 
-  if (runtimeConfig.submitOnlyUpstreamParams && runtimeConfig.upstreamParamNames.length > 0) {
-    const allowed = new Set(runtimeConfig.upstreamParamNames);
-    if (runtimeConfig.aspectRatioParamName) {
-      allowed.add(runtimeConfig.aspectRatioParamName);
-    }
-    if (runtimeConfig.generationModeParamName) {
-      allowed.add(runtimeConfig.generationModeParamName);
-    }
-
-    return Object.fromEntries(
-      Object.entries(normalizedParams).filter(([key, value]) => {
-        if (!allowed.has(key)) return false;
-        if (value === undefined || value === null) return false;
-        if (typeof value === 'string') return value.trim().length > 0;
-        if (Array.isArray(value)) return value.length > 0;
-        return true;
-      })
-    );
-  }
-
-  return normalizedParams;
+  const withDefaults = applyLingkeRuntimeDefaults(normalizedParams, runtimeConfig);
+  return filterLingkeUpstreamParams(withDefaults, runtimeConfig);
 }
 
 function summarizeLingkeParams(params: Record<string, unknown>): Record<string, unknown> {
@@ -1365,7 +1583,11 @@ function buildLingkeVideoParams(
   const family = classifyLingkeModel(modelName);
   const mode = runtimeConfig.inputMode;
   const resolution = normalizeLingkeResolutionForFamily(family, videoConfig.resolution);
-  const requestedLength = Math.max(1, Math.floor(videoConfig.video_length || 8));
+  const requestedLength = resolveLingkeRequestedDuration(
+    Math.max(1, Math.floor(videoConfig.video_length || 8)),
+    model,
+    runtimeConfig
+  );
   const params: Record<string, unknown> = {
     aspect_ratio: videoConfig.aspect_ratio || '16:9',
     resolution,
@@ -1454,7 +1676,22 @@ function buildLingkeVideoParams(
     }
   }
 
-  return params;
+  const mergedWithDefaults = applyLingkeRuntimeDefaults(params, runtimeConfig);
+  const allowedParams = filterLingkeUpstreamParams(mergedWithDefaults, runtimeConfig);
+
+  if (runtimeConfig.submitOnlyUpstreamParams && runtimeConfig.upstreamParamNames.length > 0) {
+    const durationKey = runtimeConfig.durationParamName || (runtimeConfig.upstreamParamNames.includes('duration') ? 'duration' : '');
+    if (durationKey && !isMeaningfulLingkeParamValue(allowedParams[durationKey])) {
+      allowedParams[durationKey] = requestedLength;
+    }
+    const aspectRatioKey = runtimeConfig.aspectRatioParamName || (runtimeConfig.upstreamParamNames.includes('aspect_ratio') ? 'aspect_ratio' : '');
+    if (aspectRatioKey && !isMeaningfulLingkeParamValue(allowedParams[aspectRatioKey]) && videoConfig.aspect_ratio) {
+      allowedParams[aspectRatioKey] = videoConfig.aspect_ratio;
+    }
+    return allowedParams;
+  }
+
+  return mergedWithDefaults;
 }
 
 function resolveRequestedVideoLengthSeconds(request: SoraGenerateRequest, model?: VideoModel): number {
@@ -1867,71 +2104,60 @@ async function generateViaLingkeMedia(
 
   let lastStatusSnapshot = '';
   for (let attempt = 0; attempt < LINGKE_MEDIA_MAX_POLLS; attempt += 1) {
-    const statusUrl = `${effectiveBaseUrl.replace(/\/$/, '')}/v1/media/status?task_id=${encodeURIComponent(String(taskId))}`;
-    const statusResponse = await fetchWithRetry(undiciFetch, statusUrl, () => ({
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${effectiveApiKey}`,
-      },
-    }));
-
-    const statusData: any = await statusResponse.json().catch(() => ({}));
-    if (!statusResponse.ok) {
-      throw new Error(`灵刻媒体查询失败 (${statusResponse.status})`);
-    }
-
-    const status = String(statusData?.data?.status || statusData?.status || '').toLowerCase();
-    const statusLabel = String(statusData?.data?.status || statusData?.status || '').trim();
-    const normalizedStatus = normalizeLingkeStatus(statusLabel || status);
-    const statusMessage = String(statusData?.data?.msg || statusData?.msg || '').trim();
-    const directUrl = extractVideoUrlFromUnknownPayload(statusData, effectiveBaseUrl)
-      || (typeof statusData?.data?.result_url === 'string' ? statusData.data.result_url : null);
+    const snapshot = await fetchLingkeMediaVideoTaskSnapshot(
+      effectiveBaseUrl,
+      effectiveApiKey,
+      String(taskId)
+    );
 
     const statusSnapshot = JSON.stringify({
       attempt,
-      code: statusData?.code,
-      status,
-      normalizedStatus,
-      statusLabel,
-      msg: statusData?.data?.msg || statusData?.msg || null,
-      hasDirectUrl: Boolean(directUrl),
-      dataKeys: statusData?.data && typeof statusData.data === 'object' ? Object.keys(statusData.data) : [],
+      code: snapshot.code,
+      state: snapshot.state,
+      status: snapshot.status,
+      message: snapshot.message || null,
+      hasDirectUrl: Boolean(snapshot.resultUrl),
     });
-    if (statusSnapshot !== lastStatusSnapshot || attempt === 0 || attempt % 10 === 0 || directUrl) {
+    if (statusSnapshot !== lastStatusSnapshot || attempt === 0 || attempt % 10 === 0 || snapshot.resultUrl) {
       logInfo('[LingkeMedia] Poll status:', statusSnapshot);
       lastStatusSnapshot = statusSnapshot;
     }
 
-    if (Number(statusData?.code ?? 0) === 200 && directUrl) {
+    if (snapshot.final && snapshot.resultUrl) {
       await onProgress?.(100, {
         upstreamTaskId: String(taskId),
-        upstreamStatus: statusLabel || '已完成',
-        upstreamState: normalizedStatus || 'completed',
+        upstreamStatus: snapshot.status || '已完成',
+        upstreamState: snapshot.state || 'completed',
         upstreamStatusGroup: 'completed',
         upstreamProgress: 100,
-        upstreamResultUrl: directUrl,
+        upstreamResultUrl: snapshot.resultUrl,
         upstreamFinal: true,
       });
       return {
         type: 'sora-video',
-        url: directUrl,
+        url: snapshot.resultUrl,
         cost: resolveVideoGenerationCost((await getSystemConfig()).pricing, request, model),
         videoChannelId: channel.id,
       };
     }
 
-    if (normalizedStatus === 'failed') {
+    if (snapshot.state === 'failed') {
+      const upstreamDetails = snapshot.raw && typeof snapshot.raw === 'object'
+        ? compactSnippet(JSON.stringify(snapshot.raw), 600)
+        : '';
       throw new Error(
-        String(statusData?.data?.msg || statusData?.msg || statusLabel || '灵刻媒体视频任务失败')
+        snapshot.message
+        || snapshot.status
+        || (upstreamDetails ? `灵刻媒体视频任务失败：${upstreamDetails}` : '灵刻媒体视频任务失败')
       );
     }
 
-    await onProgress?.(Math.min(95, 10 + Math.floor(attempt / 2)), {
+    await onProgress?.(Math.max(snapshot.progress, Math.min(95, 10 + Math.floor(attempt / 2))), {
       upstreamTaskId: String(taskId),
-      upstreamStatus: statusLabel || undefined,
-      upstreamState: normalizedStatus || status || undefined,
-      upstreamStatusGroup: resolveLingkeStatusGroup(statusLabel || status, Boolean(directUrl)),
-      upstreamProgress: Math.min(95, 10 + Math.floor(attempt / 2)),
+      upstreamStatus: snapshot.status || undefined,
+      upstreamState: snapshot.state || undefined,
+      upstreamStatusGroup: snapshot.statusGroup,
+      upstreamProgress: Math.max(snapshot.progress, Math.min(95, 10 + Math.floor(attempt / 2))),
     });
     await new Promise((resolve) => setTimeout(resolve, LINGKE_MEDIA_POLL_INTERVAL_MS));
   }

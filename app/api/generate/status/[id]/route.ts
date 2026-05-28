@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getGeneration } from '@/lib/db';
+import {
+  parseGenerationParams,
+  refreshLingkeImageGenerationIfNeeded,
+  refreshLingkeVideoGenerationIfNeeded,
+} from '@/lib/lingke-generation-sync';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,21 +20,11 @@ function convertToMediaUrl(
   const upstreamResultUrl =
     typeof params?.upstreamResultUrl === 'string' ? params.upstreamResultUrl.trim() : '';
 
-  if (type.includes('video') && (resultUrl || hasVideoId || upstreamResultUrl)) {
+  if (resultUrl || hasVideoId || upstreamResultUrl) {
     return `/api/media/${id}`;
   }
 
-  if (!resultUrl) return '';
-
-  if (resultUrl.includes('/v1/videos/') && resultUrl.includes('/content')) {
-    return `/api/media/${id}`;
-  }
-
-  if (resultUrl.startsWith('data:') || resultUrl.startsWith('file:')) {
-    return `/api/media/${id}`;
-  }
-
-  return resultUrl;
+  return '';
 }
 
 export async function GET(
@@ -44,30 +39,22 @@ export async function GET(
     }
 
     const { id } = await params;
-    const generation = await getGeneration(id);
+    const initialGeneration = await getGeneration(id);
 
-    if (!generation) {
+    if (!initialGeneration) {
       return NextResponse.json({ error: '任务不存在' }, { status: 404 });
     }
 
     // 验证任务所有权
-    if (generation.userId !== session.user.id) {
+    if (initialGeneration.userId !== session.user.id) {
       return NextResponse.json({ error: '无权访问此任务' }, { status: 403 });
     }
 
-    // 解析 params（可能是 JSON 字符串或对象）
-    let generationParams: Record<string, unknown> | undefined;
-    if (generation.params) {
-      if (typeof generation.params === 'string') {
-        try {
-          generationParams = JSON.parse(generation.params);
-        } catch {
-          generationParams = undefined;
-        }
-      } else {
-        generationParams = generation.params as Record<string, unknown>;
-      }
-    }
+    const publicBaseUrl = new URL(request.url).origin;
+    let generation = await refreshLingkeImageGenerationIfNeeded(initialGeneration, publicBaseUrl);
+    generation = await refreshLingkeVideoGenerationIfNeeded(generation, publicBaseUrl);
+
+    const generationParams = parseGenerationParams(generation.params);
 
     return NextResponse.json({
       success: true,

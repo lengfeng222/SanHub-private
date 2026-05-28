@@ -27,7 +27,6 @@ export default function LoginPage() {
   const callbackUrl = rawCallbackUrl?.startsWith('/') && !rawCallbackUrl.startsWith('//') ? rawCallbackUrl : '/supervideo';
   const { data: session, status, update } = useSession();
   const siteConfig = useSiteConfig();
-  const [mounted, setMounted] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [captchaId, setCaptchaId] = useState('');
@@ -39,15 +38,10 @@ export default function LoginPage() {
   const redirectingRef = useRef(false);
 
   useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  useEffect(() => {
     if ((status === 'authenticated' && session) || loginSuccess) {
       if (redirectingRef.current) return;
       redirectingRef.current = true;
       router.push(callbackUrl);
-      router.refresh();
     }
   }, [status, session, loginSuccess, router, callbackUrl]);
 
@@ -55,14 +49,6 @@ export default function LoginPage() {
     setCaptchaId(id);
     setCaptchaCode(code);
   }, []);
-
-  if (!mounted) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-foreground/50">加载中...</div>
-      </div>
-    );
-  }
 
   if (status === 'authenticated') {
     return (
@@ -124,7 +110,7 @@ export default function LoginPage() {
       <AnimatedBackground variant="auth" />
 
       <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 py-12">
-        <div className="w-full max-w-sm animate-rise space-y-8">
+        <div className="w-full max-w-sm space-y-8">
           <div className="text-center">
             <Link href="/" className="inline-flex flex-col items-center gap-4 group">
               <BrandMark

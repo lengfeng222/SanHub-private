@@ -1,8 +1,10 @@
 'use client';
 
 import { formatBillingSummary } from '@/lib/billing';
+import { getVideoPricingPreviewLabel } from '@/lib/member-pricing';
 import { cn } from '@/lib/utils';
 import { resolveImageModelImage, resolveVideoModelImage } from '@/lib/model-images';
+import type { VideoConfigObject, VideoDuration, VideoPricingRule } from '@/types';
 
 type PreviewTheme = {
   label: string;
@@ -272,17 +274,36 @@ function getModelBadge(model: { highlight?: boolean; name: string; apiModel?: st
 }
 
 function getVideoMetric(model: {
+  name: string;
+  apiModel?: string;
   billingMode?: 'per_call' | 'per_second' | 'per_1k_tokens';
   billingPrice?: number;
   billingUnit?: number;
-  durations?: Array<{ value: string; cost: number }>;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: VideoPricingRule[];
+  durations?: VideoDuration[];
+  defaultDuration?: string;
+  defaultAspectRatio?: string;
+  videoConfigObject?: VideoConfigObject;
 }) {
-  return formatBillingSummary({
-    billingMode: model.billingMode,
-    billingPrice: model.billingPrice,
-    billingUnit: model.billingUnit,
-    legacyCost: model.durations?.[0]?.cost,
-  });
+  const previewModel = {
+    ...model,
+    durations: model.durations ?? [],
+    defaultDuration: model.defaultDuration ?? '',
+    defaultAspectRatio: model.defaultAspectRatio ?? '',
+  };
+
+  return (
+    getVideoPricingPreviewLabel(previewModel, model.defaultDuration, model.videoConfigObject)
+    || formatBillingSummary({
+      billingMode: model.billingMode,
+      billingPrice: model.billingPrice,
+      billingUnit: model.billingUnit,
+      legacyCost: model.durations?.[0]?.cost,
+    })
+  );
 }
 
 function getImageMetric(model: {
@@ -306,7 +327,14 @@ export function getVideoModelPreviewMeta(model: {
   billingMode?: 'per_call' | 'per_second' | 'per_1k_tokens';
   billingPrice?: number;
   billingUnit?: number;
-  durations?: Array<{ value: string; cost: number }>;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: VideoPricingRule[];
+  durations?: VideoDuration[];
+  defaultDuration?: string;
+  defaultAspectRatio?: string;
+  videoConfigObject?: VideoConfigObject;
   features?: { imageToVideo?: boolean; videoToVideo?: boolean };
   imageUrl?: string;
 }): PreviewMeta {

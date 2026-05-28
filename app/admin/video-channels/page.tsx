@@ -13,6 +13,7 @@ import type {
   VideoModelFeatures,
   VideoDuration,
   VideoConfigObject,
+  VideoPricingRule,
 } from '@/types';
 import { formatBillingSummary } from '@/lib/billing';
 
@@ -42,15 +43,20 @@ type RemoteFlow2ApiModel = {
   categoryLabel: string;
   defaultAspectRatio: string;
   defaultDuration: string;
+  billingMode: 'per_call' | 'per_second' | 'per_1k_tokens';
+  billingPrice: number;
+  billingUnit: number;
   alreadyImported: boolean;
 };
 
 function supportsRemoteVideoModelImport(channel: VideoChannel): boolean {
-  return channel.type === 'flow2api' || channel.type === 'apexerapi';
+  return channel.type === 'flow2api' || channel.type === 'apexerapi' || channel.type === 'lingke-media';
 }
 
 function remoteVideoImportLabel(channel?: VideoChannel): string {
-  return channel?.type === 'apexerapi' ? 'ApexerAPI' : 'Flow2API';
+  if (channel?.type === 'apexerapi') return 'ApexerAPI';
+  if (channel?.type === 'lingke-media') return '灵刻';
+  return 'Flow2API';
 }
 
 const DEFAULT_ASPECT_RATIOS: AspectRatioRow[] = [
@@ -60,6 +66,10 @@ const DEFAULT_ASPECT_RATIOS: AspectRatioRow[] = [
 
 const DEFAULT_DURATIONS: VideoDuration[] = [
   { value: '8s', label: '8 秒', cost: 100 },
+];
+
+const SORA_TEMPLATE_DURATIONS: VideoDuration[] = [
+  { value: '8s', label: '8 秒', cost: 96 },
 ];
 
 const GROK_MAX_VIDEO_LENGTH_SECONDS = 30;
@@ -190,12 +200,106 @@ type ModelFormState = {
   videoConfigObject: VideoConfigObject;
   highlight: boolean;
   enabled: boolean;
-  billingMode: 'per_call' | 'per_second';
+  billingMode: 'per_call' | 'per_second' | 'per_1k_tokens';
   billingPrice: number;
   billingUnit: number;
+  normalPrice: number;
+  vipPrice: number;
+  svipPrice: number;
+  pricingRules: VideoPricingRule[];
   imageUrl: string;
   sortOrder: number;
 };
+
+type VideoPricingRuleDraft = {
+  id: string;
+  label: string;
+  duration: string;
+  aspectRatio: string;
+  resolution: string;
+  qualityVersion: string;
+  modelVersion: string;
+  version: string;
+  generationMode: string;
+  offPeak: string;
+  normalPrice: number;
+  vipPrice: number;
+  svipPrice: number;
+  enabled: boolean;
+};
+
+function createVideoPricingRuleDraft(): VideoPricingRuleDraft {
+  return {
+    id: `vrule_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    label: '',
+    duration: '',
+    aspectRatio: '',
+    resolution: '',
+    qualityVersion: '',
+    modelVersion: '',
+    version: '',
+    generationMode: '',
+    offPeak: '',
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    enabled: true,
+  };
+}
+
+function mapVideoPricingRulesToDrafts(rules?: VideoPricingRule[]): VideoPricingRuleDraft[] {
+  if (!Array.isArray(rules) || rules.length === 0) return [];
+  return rules.map((rule, index) => ({
+    id: rule.id || `vrule_${Date.now()}_${index}`,
+    label: rule.label || '',
+    duration: rule.duration || '',
+    aspectRatio: rule.aspectRatio || '',
+    resolution: rule.resolution || '',
+    qualityVersion: rule.qualityVersion || '',
+    modelVersion: rule.modelVersion || '',
+    version: rule.version || '',
+    generationMode: rule.generationMode || '',
+    offPeak: typeof rule.offPeak === 'boolean' ? String(rule.offPeak) : '',
+    normalPrice: Number(rule.normalPrice) || 0,
+    vipPrice: Number(rule.vipPrice) || 0,
+    svipPrice: Number(rule.svipPrice) || 0,
+    enabled: rule.enabled !== false,
+  }));
+}
+
+function normalizeVideoPricingRules(rules: VideoPricingRuleDraft[]): VideoPricingRule[] {
+  return rules
+    .map((rule) => ({
+      id: rule.id,
+      label: rule.label.trim() || undefined,
+      duration: rule.duration.trim() || undefined,
+      aspectRatio: rule.aspectRatio.trim() || undefined,
+      resolution: rule.resolution.trim() || undefined,
+      qualityVersion: rule.qualityVersion.trim() || undefined,
+      modelVersion: rule.modelVersion.trim() || undefined,
+      version: rule.version.trim() || undefined,
+      generationMode: rule.generationMode.trim() || undefined,
+      offPeak: rule.offPeak === 'true' ? true : rule.offPeak === 'false' ? false : undefined,
+      normalPrice: Number(rule.normalPrice) > 0 ? Number(rule.normalPrice) : undefined,
+      vipPrice: Number(rule.vipPrice) > 0 ? Number(rule.vipPrice) : undefined,
+      svipPrice: Number(rule.svipPrice) > 0 ? Number(rule.svipPrice) : undefined,
+      enabled: rule.enabled,
+    }))
+    .filter((rule) => {
+      const hasCondition = Boolean(
+        rule.duration
+        || rule.aspectRatio
+        || rule.resolution
+        || rule.qualityVersion
+        || rule.modelVersion
+        || rule.version
+        || rule.generationMode
+        || typeof rule.offPeak === 'boolean'
+      );
+      const hasPrice = Boolean(rule.normalPrice || rule.vipPrice || rule.svipPrice);
+      return hasCondition && hasPrice;
+    });
+}
 
 function buildGrokTemplateModelPayload(channelId: string) {
   return {
@@ -219,6 +323,10 @@ function buildGrokTemplateModelPayload(channelId: string) {
     billingMode: 'per_second',
     billingPrice: 12,
     billingUnit: 1,
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    pricingRules: [],
     imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
@@ -237,14 +345,18 @@ function buildSoraTemplateModelPayload(channelId: string) {
       supportStyles: false,
     },
     aspectRatios: [...DEFAULT_ASPECT_RATIOS],
-    durations: [...DEFAULT_DURATIONS],
+    durations: [...SORA_TEMPLATE_DURATIONS],
     defaultAspectRatio: 'landscape',
     defaultDuration: '8s',
     highlight: true,
     enabled: true,
-    billingMode: 'per_second' as const,
-    billingPrice: 12,
+    billingMode: 'per_call' as const,
+    billingPrice: 96,
     billingUnit: 1,
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    pricingRules: [],
     imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
@@ -272,6 +384,10 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
       billingMode: 'per_second',
       billingPrice: 12,
       billingUnit: 1,
+      normalPrice: 0,
+      vipPrice: 0,
+      svipPrice: 0,
+      pricingRules: [],
       imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
@@ -300,6 +416,10 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
       billingMode: 'per_second',
       billingPrice: 12,
       billingUnit: 1,
+      normalPrice: 0,
+      vipPrice: 0,
+      svipPrice: 0,
+      pricingRules: [],
       imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
@@ -325,9 +445,13 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
       }),
       highlight: true,
       enabled: true,
-      billingMode: 'per_second',
-      billingPrice: 12,
+      billingMode: 'per_call',
+      billingPrice: 96,
       billingUnit: 1,
+      normalPrice: 0,
+      vipPrice: 0,
+      svipPrice: 0,
+      pricingRules: [],
       imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
@@ -356,6 +480,10 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
       billingMode: 'per_second',
       billingPrice: 12,
       billingUnit: 1,
+      normalPrice: 0,
+      vipPrice: 0,
+      svipPrice: 0,
+      pricingRules: [],
       imageUrl: '/huantu-logo.jpg',
       sortOrder: 0,
     };
@@ -383,6 +511,10 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
     billingMode: 'per_second',
     billingPrice: 12,
     billingUnit: 1,
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    pricingRules: [],
     imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   };
@@ -433,12 +565,18 @@ export default function VideoChannelsPage() {
     billingMode: 'per_second',
     billingPrice: 12,
     billingUnit: 1,
+    normalPrice: 0,
+    vipPrice: 0,
+    svipPrice: 0,
+    pricingRules: [],
     imageUrl: '/huantu-logo.jpg',
     sortOrder: 0,
   });
   const [aspectRatioRows, setAspectRatioRows] = useState<AspectRatioRow[]>([...DEFAULT_ASPECT_RATIOS]);
   const [durationRows, setDurationRows] = useState<DurationRow[]>([...DEFAULT_DURATIONS]);
   const [videoExtraParamsText, setVideoExtraParamsText] = useState('');
+  const [pricingRuleDrafts, setPricingRuleDrafts] = useState<VideoPricingRuleDraft[]>([]);
+  const [showAdvancedPricing, setShowAdvancedPricing] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -514,11 +652,14 @@ export default function VideoChannelsPage() {
       videoConfigObject: {
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
       },
-      highlight: false, enabled: true, billingMode: 'per_second', billingPrice: 12, billingUnit: 1, imageUrl: '', sortOrder: 0,
+      highlight: false, enabled: true, billingMode: 'per_second', billingPrice: 12, billingUnit: 1,
+      normalPrice: 0, vipPrice: 0, svipPrice: 0, pricingRules: [], imageUrl: '', sortOrder: 0,
     });
     setVideoExtraParamsText('');
     setAspectRatioRows([...DEFAULT_ASPECT_RATIOS]);
     setDurationRows([...DEFAULT_DURATIONS]);
+    setPricingRuleDrafts([]);
+    setShowAdvancedPricing(false);
     setEditingModel(null);
     setModelChannelId(null);
   };
@@ -556,15 +697,24 @@ export default function VideoChannelsPage() {
       videoConfigObject: existingVideoConfigObject,
       highlight: model.highlight || false,
       enabled: model.enabled,
-      billingMode: (model.billingMode as 'per_call' | 'per_second') || 'per_second',
+      billingMode: (model.billingMode as 'per_call' | 'per_second' | 'per_1k_tokens') || 'per_second',
       billingPrice: model.billingPrice || 12,
       billingUnit: model.billingUnit || 1,
+      normalPrice: model.normalPrice || 0,
+      vipPrice: model.vipPrice || 0,
+      svipPrice: model.svipPrice || 0,
+      pricingRules: model.pricingRules || [],
       imageUrl: model.imageUrl || '',
       sortOrder: model.sortOrder,
     });
     setVideoExtraParamsText(formatExtraParamsForTextarea(existingVideoConfigObject.extra_params));
     setAspectRatioRows(model.aspectRatios);
     setDurationRows(model.durations);
+    setPricingRuleDrafts(mapVideoPricingRulesToDrafts(model.pricingRules));
+    setShowAdvancedPricing(Boolean(
+      (model.normalPrice || model.vipPrice || model.svipPrice || 0) > 0
+      || (Array.isArray(model.pricingRules) && model.pricingRules.length > 0)
+    ));
     setEditingModel(model.id);
     setModelChannelId(model.channelId);
   };
@@ -585,8 +735,12 @@ export default function VideoChannelsPage() {
     setDurationRows(
       channel.type === 'grok2api'
         ? [...GROK_TEMPLATE_DURATIONS]
-        : [...DEFAULT_DURATIONS]
+        : channel.type === 'sora' || channel.type === 'apexerapi'
+          ? [...SORA_TEMPLATE_DURATIONS]
+          : [...DEFAULT_DURATIONS]
     );
+    setPricingRuleDrafts(mapVideoPricingRulesToDrafts(template.pricingRules));
+    setShowAdvancedPricing(false);
     setModelChannelId(channelId);
   };
 
@@ -670,6 +824,7 @@ export default function VideoChannelsPage() {
         body: JSON.stringify({
           channelId: channel.id,
           modelIds: importableIds,
+          overwrite: channel.type === 'lingke-media',
         }),
       });
       const importData = await importRes.json().catch(() => ({}));
@@ -678,8 +833,8 @@ export default function VideoChannelsPage() {
       }
 
       toast({
-        title: `${channelLabel} 一键导入完成`,
-        description: `\u65b0\u589e ${importData?.data?.created || 0} \u4e2a\uff0c\u8df3\u8fc7 ${importData?.data?.skipped || 0} \u4e2a`,
+        title: `${channelLabel} 一键同步完成`,
+        description: `新增 ${importData?.data?.created || 0} 个，更新 ${importData?.data?.updated || 0} 个，跳过 ${importData?.data?.skipped || 0} 个`,
       });
 
       await loadData();
@@ -840,6 +995,7 @@ export default function VideoChannelsPage() {
         body: JSON.stringify({
           channelId: remoteFlowModelsChannelId,
           modelIds: Array.from(selectedRemoteFlowModels),
+          overwrite: channels.find((item) => item.id === remoteFlowModelsChannelId)?.type === 'lingke-media',
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -848,7 +1004,7 @@ export default function VideoChannelsPage() {
       }
       const summary = data?.data || {};
       toast({
-        title: `导入完成：新增 ${summary.created || 0}，跳过 ${summary.skipped || 0}`,
+        title: `同步完成：新增 ${summary.created || 0}，更新 ${summary.updated || 0}，跳过 ${summary.skipped || 0}`,
       });
       await loadData();
       const currentChannel = channels.find((item) => item.id === remoteFlowModelsChannelId);
@@ -967,6 +1123,10 @@ export default function VideoChannelsPage() {
         billingMode: modelForm.billingMode,
         billingPrice: modelForm.billingPrice,
         billingUnit: modelForm.billingUnit,
+        normalPrice: modelForm.normalPrice || undefined,
+        vipPrice: modelForm.vipPrice || undefined,
+        svipPrice: modelForm.svipPrice || undefined,
+        pricingRules: normalizeVideoPricingRules(pricingRuleDrafts),
         imageUrl: modelForm.imageUrl || undefined,
         sortOrder: modelForm.sortOrder,
       };
@@ -1420,37 +1580,254 @@ export default function VideoChannelsPage() {
                 className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
               />
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">计费方式</label>
-              <select
-                value={modelForm.billingMode}
-                onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              >
-                <option value="per_second" className="bg-card/95">按秒</option>
-                <option value="per_call" className="bg-card/95">按次</option>
-              </select>
+          </div>
+
+          <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-4">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-sm font-medium text-foreground">基础定价</div>
+                <p className="text-xs text-foreground/50">默认只需要设置按秒或按次，以及基础价格。适合绝大多数模型。</p>
+              </div>
+              <div className="rounded-full border border-emerald-400/20 bg-card/70 px-4 py-2 text-sm text-emerald-300">
+                当前：{formatBillingSummary({
+                  billingMode: modelForm.billingMode,
+                  billingPrice: modelForm.billingPrice,
+                  billingUnit: modelForm.billingUnit,
+                })}
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">计费价格</label>
-              <input
-                type="number"
-                value={modelForm.billingPrice}
-                onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 12 })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              />
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">计费方式</label>
+                <select
+                  value={modelForm.billingMode}
+                  onChange={(e) => setModelForm({ ...modelForm, billingMode: e.target.value as 'per_call' | 'per_second' | 'per_1k_tokens' })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                >
+                  <option value="per_second" className="bg-card/95">按秒</option>
+                  <option value="per_call" className="bg-card/95">按次</option>
+                  <option value="per_1k_tokens" className="bg-card/95">按 1K Tokens</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">价格</label>
+                <input
+                  type="number"
+                  value={modelForm.billingPrice}
+                  onChange={(e) => setModelForm({ ...modelForm, billingPrice: parseInt(e.target.value) || 0 })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                  placeholder="例如 12"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-foreground/70">
+                  {modelForm.billingMode === 'per_second'
+                    ? '每多少秒'
+                    : modelForm.billingMode === 'per_1k_tokens'
+                      ? '每多少个 1K Tokens'
+                      : '每多少条'}
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={modelForm.billingUnit}
+                  onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
+                  className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm text-foreground/70">{modelForm.billingMode === 'per_second' ? '每多少秒' : '计费单位'}</label>
-              <input
-                type="number"
-                min="1"
-                value={modelForm.billingUnit}
-                onChange={(e) => setModelForm({ ...modelForm, billingUnit: parseInt(e.target.value) || 1 })}
-                className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
-              />
+
+            <div className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium text-foreground">会员价格</div>
+                  <p className="text-xs text-foreground/45">不填就按基础定价计算。需要分会员价时再填写。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedPricing((prev) => !prev)}
+                  className="rounded-full border border-border/70 px-3 py-1.5 text-xs text-foreground/70 hover:text-foreground"
+                >
+                  {showAdvancedPricing ? '收起高级定价' : '展开高级定价'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">普通价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.normalPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, normalPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                    placeholder="留空则用基础价"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">VIP 价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.vipPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, vipPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                    placeholder="留空则用基础价"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-foreground/70">SVIP 价</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={modelForm.svipPrice}
+                    onChange={(e) => setModelForm({ ...modelForm, svipPrice: parseInt(e.target.value) || 0 })}
+                    className="w-full px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border"
+                    placeholder="留空则用基础价"
+                  />
+                </div>
+              </div>
             </div>
           </div>
+
+          {showAdvancedPricing && (
+          <div className="space-y-3 rounded-2xl border border-border/60 bg-card/40 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-foreground">高级定价规则</div>
+                <p className="text-xs text-foreground/45">按时长 / 比例 / 分辨率 / qualityVersion / modelVersion / version / generationMode / offPeak 单独覆盖价格。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPricingRuleDrafts((prev) => [...prev, createVideoPricingRuleDraft()])}
+                className="rounded-lg border border-border/70 px-3 py-1.5 text-xs text-foreground/70 hover:text-foreground"
+              >
+                添加规则
+              </button>
+            </div>
+
+            {pricingRuleDrafts.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/60 px-4 py-5 text-center text-sm text-foreground/35">
+                暂无规则，未命中时会使用上面的模型默认三档价格
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {pricingRuleDrafts.map((rule, index) => (
+                  <div key={rule.id} className="grid grid-cols-1 gap-3 rounded-xl border border-border/60 bg-card/50 p-3 md:grid-cols-12">
+                    <input
+                      type="text"
+                      value={rule.label}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, label: e.target.value } : item))}
+                      placeholder="规则名，如 veo3.1 8s 1080P"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border md:col-span-3"
+                    />
+                    <input
+                      type="text"
+                      value={rule.duration}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, duration: e.target.value } : item))}
+                      placeholder="8s / 10s"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.aspectRatio}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, aspectRatio: e.target.value } : item))}
+                      placeholder="16:9 / 9:16"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.resolution}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, resolution: e.target.value } : item))}
+                      placeholder="720P / 1080P"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.qualityVersion}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, qualityVersion: e.target.value } : item))}
+                      placeholder="qualityVersion"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border md:col-span-2"
+                    />
+                    <input
+                      type="text"
+                      value={rule.modelVersion}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, modelVersion: e.target.value } : item))}
+                      placeholder="modelVersion"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border md:col-span-2"
+                    />
+                    <input
+                      type="text"
+                      value={rule.version}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, version: e.target.value } : item))}
+                      placeholder="version"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="text"
+                      value={rule.generationMode}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, generationMode: e.target.value } : item))}
+                      placeholder="generationMode"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border md:col-span-2"
+                    />
+                    <select
+                      value={rule.offPeak}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, offPeak: e.target.value } : item))}
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-border"
+                    >
+                      <option value="" className="bg-card/95">是否错峰</option>
+                      <option value="true" className="bg-card/95">是</option>
+                      <option value="false" className="bg-card/95">否</option>
+                    </select>
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.normalPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, normalPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="普通价"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.vipPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, vipPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="VIP"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      value={rule.svipPrice}
+                      onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, svipPrice: parseInt(e.target.value) || 0 } : item))}
+                      placeholder="SVIP"
+                      className="w-full rounded-xl border border-border/70 bg-card/60 px-3 py-2.5 text-sm text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-border"
+                    />
+                    <div className="flex items-center justify-between md:col-span-12">
+                      <label className="flex items-center gap-2 text-xs text-foreground/60">
+                        <input
+                          type="checkbox"
+                          checked={rule.enabled}
+                          onChange={(e) => setPricingRuleDrafts((prev) => prev.map((item, i) => i === index ? { ...item, enabled: e.target.checked } : item))}
+                          className="rounded border-border/70 bg-card/60"
+                        />
+                        启用此规则
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setPricingRuleDrafts((prev) => prev.filter((item) => item.id !== rule.id))}
+                        className="rounded-lg px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/10"
+                      >
+                        删除规则
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          )}
 
           {(() => {
             const currentChannel = channels.find((channel) => channel.id === modelChannelId);
@@ -1881,7 +2258,11 @@ export default function VideoChannelsPage() {
                                       </div>
                                       <p className="text-xs text-foreground/40 mt-1">{item.description}</p>
                                       <p className="text-xs text-foreground/30 mt-1">
-                                        {item.id} · 默认 {item.defaultAspectRatio} / {item.defaultDuration}
+                                        {item.id} · 默认 {item.defaultAspectRatio} / {item.defaultDuration} · {formatBillingSummary({
+                                          billingMode: item.billingMode,
+                                          billingPrice: item.billingPrice,
+                                          billingUnit: item.billingUnit,
+                                        })}
                                       </p>
                                     </button>
                                   );
@@ -1928,6 +2309,10 @@ export default function VideoChannelsPage() {
                                     billingUnit: model.billingUnit,
                                     legacyCost: model.durations?.[0]?.cost || 0,
                                   })}
+                                </p>
+                                <p className="text-xs text-foreground/30">
+                                  三档价：普 {model.normalPrice || '-'} / VIP {model.vipPrice || '-'} / SVIP {model.svipPrice || '-'}
+                                  {Array.isArray(model.pricingRules) && model.pricingRules.length > 0 ? ` · 规则 ${model.pricingRules.length} 条` : ''}
                                 </p>
                               </div>
                             </div>

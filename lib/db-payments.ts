@@ -1,7 +1,8 @@
 import type { Generation } from '@/types';
 import { createDatabaseAdapter, type DatabaseAdapter } from './db-adapter';
 import { generateId } from './utils';
-import { updateUserBalance } from './db';
+import { getUserById, updateUser, updateUserBalance } from './db';
+import { resolveMembershipUpdate } from './member-pricing';
 
 export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'closed';
 
@@ -149,6 +150,11 @@ export async function markPaymentOrderPaid(outTradeNo: string, tradeNo: string):
   }
 
   await updateUserBalance(order.userId, order.points, 'strict');
+  const user = await getUserById(order.userId);
+  const membershipUpdate = resolveMembershipUpdate(user, order.amount, now);
+  if (user && membershipUpdate) {
+    await updateUser(order.userId, membershipUpdate);
+  }
   const paidOrder = await getPaymentOrderByOutTradeNo(outTradeNo);
   return { credited: true, order: paidOrder };
 }

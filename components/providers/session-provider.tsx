@@ -13,7 +13,7 @@ export function AuthSessionProvider({ children, session }: AuthSessionProviderPr
     <SessionProvider
       session={session}
       refetchInterval={5 * 60}
-      refetchOnWindowFocus={true}
+      refetchOnWindowFocus={false}
     >
       {children}
     </SessionProvider>

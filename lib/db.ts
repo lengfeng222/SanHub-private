@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import type { User, Generation, SystemConfig, SafeUser, PricingConfig, ChatModel, ChatSession, ChatMessage, CharacterCard, Workspace, WorkspaceData, WorkspaceSummary, ImageBucketConfig, ImageStorageConfig } from '@/types';
+import type { User, Generation, SystemConfig, SafeUser, PricingConfig, ChatModel, ChatSession, ChatMessage, CharacterCard, Workspace, WorkspaceData, WorkspaceSummary, ImageBucketConfig, ImageStorageConfig, MembershipLevel } from '@/types';
 import { generateId } from './utils';
 import bcrypt from 'bcryptjs';
 import { createDatabaseAdapter, type DatabaseAdapter } from './db-adapter';
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS users (
   name VARCHAR(100) NOT NULL,
   role ENUM('user', 'admin', 'moderator') DEFAULT 'user',
   balance INT DEFAULT 100,
+  membership_level VARCHAR(20) DEFAULT 'normal',
+  membership_expires_at BIGINT DEFAULT 0,
   disabled TINYINT(1) DEFAULT 0,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
@@ -280,6 +282,16 @@ async function initializeDatabaseInternal(): Promise<void> {
   } catch {
     // 字段已存在，忽略错误
   }
+  try {
+    await db.execute("ALTER TABLE users ADD COLUMN membership_level VARCHAR(20) DEFAULT 'normal'");
+  } catch {
+    // 字段已存在，忽略错误
+  }
+  try {
+    await db.execute('ALTER TABLE users ADD COLUMN membership_expires_at BIGINT DEFAULT 0');
+  } catch {
+    // 字段已存在，忽略错误
+  }
 
   // 添加 generations 表的新字段（如果不存在）
   try {
@@ -319,10 +331,18 @@ async function initializeDatabaseInternal(): Promise<void> {
     'ALTER TABLE image_models ADD COLUMN billing_mode VARCHAR(50) DEFAULT \'per_call\'',
     'ALTER TABLE image_models ADD COLUMN billing_price INT DEFAULT 10',
     'ALTER TABLE image_models ADD COLUMN billing_unit INT DEFAULT 1',
+    'ALTER TABLE image_models ADD COLUMN normal_price INT DEFAULT 0',
+    'ALTER TABLE image_models ADD COLUMN vip_price INT DEFAULT 0',
+    'ALTER TABLE image_models ADD COLUMN svip_price INT DEFAULT 0',
+    'ALTER TABLE image_models ADD COLUMN pricing_rules TEXT',
     'ALTER TABLE image_models ADD COLUMN image_url TEXT',
     'ALTER TABLE video_models ADD COLUMN billing_mode VARCHAR(50) DEFAULT \'per_second\'',
     'ALTER TABLE video_models ADD COLUMN billing_price INT DEFAULT 12',
     'ALTER TABLE video_models ADD COLUMN billing_unit INT DEFAULT 1',
+    'ALTER TABLE video_models ADD COLUMN normal_price INT DEFAULT 0',
+    'ALTER TABLE video_models ADD COLUMN vip_price INT DEFAULT 0',
+    'ALTER TABLE video_models ADD COLUMN svip_price INT DEFAULT 0',
+    'ALTER TABLE video_models ADD COLUMN pricing_rules TEXT',
     'ALTER TABLE video_models ADD COLUMN image_url TEXT',
     'ALTER TABLE system_config ADD COLUMN music_billing_mode VARCHAR(50) DEFAULT \'per_call\'',
     'ALTER TABLE system_config ADD COLUMN music_billing_price INT DEFAULT 10',
@@ -795,15 +815,17 @@ export async function createUser(
     name,
     role,
     balance: balance ?? config.defaultBalance,
+    membershipLevel: 'normal',
+    membershipExpiresAt: 0,
     disabled: false,
     createdAt: now,
     updatedAt: now,
   };
 
   await db.execute(
-    `INSERT INTO users (id, email, password, name, role, balance, disabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [user.id, user.email, user.password, user.name, user.role, user.balance, user.disabled, user.createdAt, user.updatedAt]
+    `INSERT INTO users (id, email, password, name, role, balance, membership_level, membership_expires_at, disabled, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [user.id, user.email, user.password, user.name, user.role, user.balance, user.membershipLevel, user.membershipExpiresAt, user.disabled, user.createdAt, user.updatedAt]
   );
 
   return user;
@@ -829,6 +851,8 @@ export async function getUserById(id: string): Promise<User | null> {
     name: row.name,
     role: row.role,
     balance: row.balance,
+    membershipLevel: row.membership_level || 'normal',
+    membershipExpiresAt: Number(row.membership_expires_at || 0),
     disabled: Boolean(row.disabled),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -855,6 +879,8 @@ export async function getUserByEmail(email: string): Promise<User | null> {
     name: row.name,
     role: row.role,
     balance: row.balance,
+    membershipLevel: row.membership_level || 'normal',
+    membershipExpiresAt: Number(row.membership_expires_at || 0),
     disabled: Boolean(row.disabled),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -907,6 +933,14 @@ export async function updateUser(
   if (updates.balance !== undefined) {
     fields.push('balance = ?');
     values.push(updates.balance);
+  }
+  if (updates.membershipLevel !== undefined) {
+    fields.push('membership_level = ?');
+    values.push(updates.membershipLevel);
+  }
+  if (updates.membershipExpiresAt !== undefined) {
+    fields.push('membership_expires_at = ?');
+    values.push(updates.membershipExpiresAt);
   }
   if (updates.disabled !== undefined) {
     fields.push('disabled = ?');
@@ -983,7 +1017,7 @@ export async function getAllUsers(options: {
   const offset = Math.max(Number(options.offset) || 0, 0);
   const search = options.search?.trim();
 
-  let sql = 'SELECT id, email, name, role, balance, disabled, created_at FROM users';
+  let sql = 'SELECT id, email, name, role, balance, membership_level, membership_expires_at, disabled, created_at FROM users';
   const params: unknown[] = [];
 
   if (search) {
@@ -1002,6 +1036,8 @@ export async function getAllUsers(options: {
     name: row.name,
     role: row.role,
     balance: row.balance,
+    membershipLevel: (row.membership_level || 'normal') as MembershipLevel,
+    membershipExpiresAt: Number(row.membership_expires_at || 0),
     disabled: Boolean(row.disabled),
     createdAt: Number(row.created_at),
   }));
@@ -1197,7 +1233,7 @@ export async function refundGenerationBalance(
   }
 }
 
-export type UserGenerationKindFilter = 'all' | 'video' | 'image';
+export type UserGenerationKindFilter = 'all' | 'video' | 'image' | 'audio';
 export type UserGenerationStatusFilter =
   | 'all'
   | 'active'
@@ -1230,9 +1266,9 @@ export async function getUserGenerations(
     whereClauses.push('type LIKE ?');
     values.push('%video%');
   } else if (options.kind === 'image') {
-    whereClauses.push('type NOT LIKE ?');
-    whereClauses.push('type <> ?');
-    values.push('%video%', 'character-card');
+    whereClauses.push("type IN ('sora-image', 'gemini-image', 'zimage-image', 'gitee-image')");
+  } else if (options.kind === 'audio') {
+    whereClauses.push("type IN ('music', 'voice')");
   }
 
   switch (options.status) {
@@ -1447,14 +1483,13 @@ export async function deleteGenerations(ids: string[], userId: string): Promise<
   return (result as any).affectedRows || 0;
 }
 
-// 清空用户所有已完成的生成记录
+// 清空用户所有生成记录
 export async function deleteAllUserGenerations(userId: string): Promise<number> {
   await initializeDatabase();
   const db = getAdapter();
 
-  // 只删除已完成或失败的，保留进行中的任务
   const [result] = await db.execute(
-    `DELETE FROM generations WHERE user_id = ? AND status NOT IN ('pending', 'processing')`,
+    `DELETE FROM generations WHERE user_id = ?`,
     [userId]
   );
 
@@ -2321,9 +2356,9 @@ async function initializeAdmin(): Promise<void> {
     const now = Date.now();
 
     await db.execute(
-      `INSERT INTO users (id, email, password, name, role, balance, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [generateId(), adminEmail, hashedPassword, 'Admin', 'admin', 999999, now, now]
+      `INSERT INTO users (id, email, password, name, role, balance, membership_level, membership_expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [generateId(), adminEmail, hashedPassword, 'Admin', 'admin', 999999, 'svip', 4102444800000, now, now]
     );
     console.log('Admin account created:', adminEmail);
   }
@@ -2979,6 +3014,10 @@ CREATE TABLE IF NOT EXISTS image_models (
   billing_mode VARCHAR(50) DEFAULT 'per_call',
   billing_price INT DEFAULT 10,
   billing_unit INT DEFAULT 1,
+  normal_price INT DEFAULT 0,
+  vip_price INT DEFAULT 0,
+  svip_price INT DEFAULT 0,
+  pricing_rules TEXT,
   image_url TEXT,
   sort_order INT DEFAULT 0,
   created_at BIGINT NOT NULL,
@@ -3181,6 +3220,20 @@ function parseResolutions(raw: unknown): Record<string, string | Record<string, 
   return {};
 }
 
+function parsePricingRules<T>(raw: unknown): T[] {
+  if (!raw) return [];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed as T[] : [];
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(raw)) return raw as T[];
+  return [];
+}
+
 // 获取所有图像模型
 export async function getImageModels(enabledOnly = false): Promise<ImageModel[]> {
   await initializeDatabase();
@@ -3215,6 +3268,10 @@ export async function getImageModels(enabledOnly = false): Promise<ImageModel[]>
     billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
     billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
     billingUnit: Number(row.billing_unit) || 1,
+    normalPrice: Number(row.normal_price) || undefined,
+    vipPrice: Number(row.vip_price) || undefined,
+    svipPrice: Number(row.svip_price) || undefined,
+    pricingRules: parsePricingRules(row.pricing_rules),
     imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
@@ -3256,6 +3313,10 @@ export async function getImageModelsByChannel(channelId: string, enabledOnly = f
     billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
     billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
     billingUnit: Number(row.billing_unit) || 1,
+    normalPrice: Number(row.normal_price) || undefined,
+    vipPrice: Number(row.vip_price) || undefined,
+    svipPrice: Number(row.svip_price) || undefined,
+    pricingRules: parsePricingRules(row.pricing_rules),
     imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
@@ -3296,6 +3357,10 @@ export async function getImageModel(id: string): Promise<ImageModel | null> {
     billingMode: normalizeBillingMode(row.billing_mode, 'per_call'),
     billingPrice: Number(row.billing_price) || Number(row.cost_per_generation) || 10,
     billingUnit: Number(row.billing_unit) || 1,
+    normalPrice: Number(row.normal_price) || undefined,
+    vipPrice: Number(row.vip_price) || undefined,
+    svipPrice: Number(row.svip_price) || undefined,
+    pricingRules: parsePricingRules(row.pricing_rules),
     imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
@@ -3320,8 +3385,10 @@ export async function createImageModel(
       features, aspect_ratios, resolutions, image_sizes,
       default_aspect_ratio, default_image_size,
       requires_reference_image, allow_empty_prompt, highlight,
-      enabled, cost_per_generation, billing_mode, billing_price, billing_unit, image_url, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      enabled, cost_per_generation, billing_mode, billing_price, billing_unit,
+      normal_price, vip_price, svip_price, pricing_rules,
+      image_url, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       model.channelId,
@@ -3344,6 +3411,10 @@ export async function createImageModel(
       model.billingMode || 'per_call',
       model.billingPrice ?? model.costPerGeneration,
       model.billingUnit ?? 1,
+      model.normalPrice ?? 0,
+      model.vipPrice ?? 0,
+      model.svipPrice ?? 0,
+      model.pricingRules ? JSON.stringify(model.pricingRules) : null,
       model.imageUrl || '',
       model.sortOrder,
       now,
@@ -3386,6 +3457,14 @@ export async function updateImageModel(
   if (updates.billingMode !== undefined) { fields.push('billing_mode = ?'); values.push(updates.billingMode); }
   if (updates.billingPrice !== undefined) { fields.push('billing_price = ?'); values.push(updates.billingPrice); }
   if (updates.billingUnit !== undefined) { fields.push('billing_unit = ?'); values.push(updates.billingUnit); }
+  if (updates.normalPrice !== undefined) { fields.push('normal_price = ?'); values.push(updates.normalPrice); }
+  if (updates.vipPrice !== undefined) { fields.push('vip_price = ?'); values.push(updates.vipPrice); }
+  if (updates.svipPrice !== undefined) { fields.push('svip_price = ?'); values.push(updates.svipPrice); }
+  if (Object.prototype.hasOwnProperty.call(updates, 'pricingRules')) {
+    const value = (updates as { pricingRules?: ImageModel['pricingRules'] }).pricingRules;
+    fields.push('pricing_rules = ?');
+    values.push(value ? JSON.stringify(value) : null);
+  }
   if (updates.imageUrl !== undefined) { fields.push('image_url = ?'); values.push(updates.imageUrl); }
   if (updates.sortOrder !== undefined) { fields.push('sort_order = ?'); values.push(updates.sortOrder); }
 
@@ -3439,6 +3518,10 @@ export async function getSafeImageModels(enabledOnly = false): Promise<SafeImage
         billingMode: m.billingMode,
         billingPrice: m.billingPrice,
         billingUnit: m.billingUnit,
+        normalPrice: m.normalPrice,
+        vipPrice: m.vipPrice,
+        svipPrice: m.svipPrice,
+        pricingRules: m.pricingRules,
         imageUrl: m.imageUrl,
       };
     });
@@ -3523,6 +3606,10 @@ CREATE TABLE IF NOT EXISTS video_models (
   billing_mode VARCHAR(50) DEFAULT 'per_second',
   billing_price INT DEFAULT 12,
   billing_unit INT DEFAULT 1,
+  normal_price INT DEFAULT 0,
+  vip_price INT DEFAULT 0,
+  svip_price INT DEFAULT 0,
+  pricing_rules TEXT,
   image_url TEXT,
   sort_order INT DEFAULT 0,
   created_at BIGINT NOT NULL,
@@ -3814,6 +3901,10 @@ export async function getVideoModels(enabledOnly = false): Promise<VideoModel[]>
     billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
     billingPrice: Number(row.billing_price) || 12,
     billingUnit: Number(row.billing_unit) || 1,
+    normalPrice: Number(row.normal_price) || undefined,
+    vipPrice: Number(row.vip_price) || undefined,
+    svipPrice: Number(row.svip_price) || undefined,
+    pricingRules: parsePricingRules(row.pricing_rules),
     imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
@@ -3851,6 +3942,10 @@ export async function getVideoModel(id: string): Promise<VideoModel | null> {
     billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
     billingPrice: Number(row.billing_price) || 12,
     billingUnit: Number(row.billing_unit) || 1,
+    normalPrice: Number(row.normal_price) || undefined,
+    vipPrice: Number(row.vip_price) || undefined,
+    svipPrice: Number(row.svip_price) || undefined,
+    pricingRules: parsePricingRules(row.pricing_rules),
     imageUrl: row.image_url || undefined,
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
@@ -3874,8 +3969,10 @@ export async function createVideoModel(
       id, channel_id, name, description, api_model, base_url, api_key,
       features, aspect_ratios, durations,
       default_aspect_ratio, default_duration, video_config_object, highlight,
-      enabled, billing_mode, billing_price, billing_unit, image_url, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      enabled, billing_mode, billing_price, billing_unit,
+      normal_price, vip_price, svip_price, pricing_rules,
+      image_url, sort_order, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       model.channelId,
@@ -3895,6 +3992,10 @@ export async function createVideoModel(
       model.billingMode || 'per_second',
       model.billingPrice ?? 12,
       model.billingUnit ?? 1,
+      model.normalPrice ?? 0,
+      model.vipPrice ?? 0,
+      model.svipPrice ?? 0,
+      model.pricingRules ? JSON.stringify(model.pricingRules) : null,
       model.imageUrl || '',
       model.sortOrder,
       now,
@@ -3938,6 +4039,14 @@ export async function updateVideoModel(
   if (updates.billingMode !== undefined) { fields.push('billing_mode = ?'); values.push(updates.billingMode); }
   if (updates.billingPrice !== undefined) { fields.push('billing_price = ?'); values.push(updates.billingPrice); }
   if (updates.billingUnit !== undefined) { fields.push('billing_unit = ?'); values.push(updates.billingUnit); }
+  if (updates.normalPrice !== undefined) { fields.push('normal_price = ?'); values.push(updates.normalPrice); }
+  if (updates.vipPrice !== undefined) { fields.push('vip_price = ?'); values.push(updates.vipPrice); }
+  if (updates.svipPrice !== undefined) { fields.push('svip_price = ?'); values.push(updates.svipPrice); }
+  if (Object.prototype.hasOwnProperty.call(updates, 'pricingRules')) {
+    const value = (updates as { pricingRules?: VideoModel['pricingRules'] }).pricingRules;
+    fields.push('pricing_rules = ?');
+    values.push(value ? JSON.stringify(value) : null);
+  }
   if (updates.imageUrl !== undefined) { fields.push('image_url = ?'); values.push(updates.imageUrl); }
   if (updates.sortOrder !== undefined) { fields.push('sort_order = ?'); values.push(updates.sortOrder); }
 

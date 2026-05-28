@@ -9,7 +9,7 @@ import {
 import { checkRateLimit, RateLimitConfig } from '@/lib/rate-limit';
 import type { Generation } from '@/types';
 
-const HISTORY_KINDS = new Set<UserGenerationKindFilter>(['all', 'video', 'image']);
+const HISTORY_KINDS = new Set<UserGenerationKindFilter>(['all', 'video', 'image', 'audio']);
 const HISTORY_STATUSES = new Set<UserGenerationStatusFilter>([
   'all',
   'active',
@@ -34,7 +34,7 @@ function parseHistoryStatus(value: string | null): UserGenerationStatusFilter {
 }
 
 function convertToMediaUrl(generation: Generation): Generation {
-  const { resultUrl, type } = generation;
+  const resultUrl = typeof generation.resultUrl === 'string' ? generation.resultUrl : '';
   const upstreamResultUrl =
     typeof generation.params === 'object' && generation.params && 'upstreamResultUrl' in generation.params
       ? generation.params.upstreamResultUrl
@@ -44,25 +44,7 @@ function convertToMediaUrl(generation: Generation): Generation {
       ? generation.params.videoId
       : undefined;
 
-  if (type.includes('video') && (resultUrl || videoId || upstreamResultUrl)) {
-    return {
-      ...generation,
-      resultUrl: `/api/media/${generation.id}`,
-    };
-  }
-
-  if (!resultUrl) {
-    return generation;
-  }
-
-  if (resultUrl.includes('/v1/videos/') && resultUrl.includes('/content')) {
-    return {
-      ...generation,
-      resultUrl: `/api/media/${generation.id}`,
-    };
-  }
-
-  if (resultUrl.startsWith('data:') || resultUrl.startsWith('file:')) {
+  if (resultUrl || videoId || upstreamResultUrl) {
     return {
       ...generation,
       resultUrl: `/api/media/${generation.id}`,

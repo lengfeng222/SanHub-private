@@ -93,7 +93,7 @@ export function DashboardShell({ user, children }: DashboardShellProps) {
           </aside>
 
           <main className="ml-12 h-screen overflow-hidden p-0">
-            <div className="animate-rise">{children}</div>
+            <div>{children}</div>
           </main>
         </div>
       </>
@@ -206,7 +206,7 @@ export function DashboardShell({ user, children }: DashboardShellProps) {
         >
           <div className="mx-auto w-full max-w-[1440px] px-4 sm:px-6 lg:px-10">
             <AnnouncementBanner />
-            <div className="animate-rise">{children}</div>
+            <div>{children}</div>
           </div>
         </main>
       </div>

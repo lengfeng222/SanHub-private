@@ -270,7 +270,16 @@ export default function UserProfilePage() {
     }
   }, [selectedVideo]);
 
-  if (!siteConfig.squareEnabled) return null;
+  if (!siteConfig.squareEnabled) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-6 py-8 text-center text-white/70 backdrop-blur-xl">
+          <p className="text-lg font-medium text-white">广场功能已关闭</p>
+          <p className="mt-2 text-sm text-white/45">正在返回创作页…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">

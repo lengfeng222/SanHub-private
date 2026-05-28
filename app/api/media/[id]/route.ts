@@ -88,16 +88,19 @@ export async function GET(
       }
     }
     
+    const shouldDownload = request.nextUrl.searchParams.get('download') === '1';
+    const shouldOpen = request.nextUrl.searchParams.get('open') === '1';
+
     // 1. 本地文件存储 (file:xxx.png)
     if (isLocalFile(resultUrl)) {
       const file = await readMediaFile(resultUrl);
       if (!file) {
         return new NextResponse('File not found', { status: 404 });
       }
-      return createMediaResponse(request, file.buffer, file.mimeType, id);
+      return createMediaResponse(request, file.buffer, file.mimeType, id, shouldDownload);
     }
     
-    // 2. 外部 URL，代理请求或重定向
+    // 2. 外部 URL，下载时走服务端代理，预览时重定向
     if (resultUrl.startsWith('http://') || resultUrl.startsWith('https://')) {
       const origin = new URL(request.url).origin;
       let safeUrl: URL;
@@ -107,17 +110,36 @@ export async function GET(
         console.error('[Media API] Blocked external URL:', error);
         return new NextResponse('Invalid media URL', { status: 400 });
       }
-      // 对于视频，优先应用视频加速域名，再重定向（避免代理大文件）
+
+      let finalUrl = safeUrl.toString();
       if (generation.type.includes('video')) {
         try {
           const { applyVideoProxy } = await import('@/lib/sora-api');
-          const proxied = await applyVideoProxy(safeUrl.toString());
-          return createRedirectResponse(proxied);
+          finalUrl = await applyVideoProxy(safeUrl.toString());
         } catch {
-          return createRedirectResponse(safeUrl.toString());
+          finalUrl = safeUrl.toString();
         }
       }
-      return createRedirectResponse(safeUrl.toString());
+
+      if (shouldDownload) {
+        try {
+          const upstream = await fetch(finalUrl, {
+            redirect: 'follow',
+            cache: 'no-store',
+          });
+          if (!upstream.ok) {
+            throw new Error(`Upstream download failed with status ${upstream.status}`);
+          }
+          const contentType = upstream.headers.get('content-type')?.split(';')[0] || 'application/octet-stream';
+          const buffer = Buffer.from(await upstream.arrayBuffer());
+          return createMediaResponse(request, buffer, contentType, id, true);
+        } catch (error) {
+          console.error('[Media API] Proxy download failed:', error);
+          return createRedirectResponse(finalUrl, true, shouldOpen);
+        }
+      }
+
+      return createRedirectResponse(finalUrl, false, shouldOpen);
     }
     
     // 3. Base64 data URL
@@ -131,17 +153,20 @@ export async function GET(
     const base64Data = match[2];
     const buffer = Buffer.from(base64Data, 'base64');
     
-    return createMediaResponse(request, buffer, mimeType, id);
+    return createMediaResponse(request, buffer, mimeType, id, shouldDownload);
   } catch (error) {
     console.error('[Media API] Error:', error);
     return new NextResponse('Internal Server Error', { status: 500 });
   }
 }
 
-function createRedirectResponse(url: string): NextResponse {
+function createRedirectResponse(url: string, download = false, open = false): NextResponse {
   const response = NextResponse.redirect(url, 302);
   response.headers.set('Cache-Control', MEDIA_REDIRECT_CACHE_CONTROL);
   response.headers.set('Vary', 'Cookie');
+  if (download && !open) {
+    response.headers.set('Content-Disposition', 'attachment');
+  }
   return response;
 }
 
@@ -163,7 +188,8 @@ function createMediaResponse(
   request: NextRequest,
   buffer: Buffer,
   contentType: string,
-  cacheKey: string
+  cacheKey: string,
+  download = false
 ): NextResponse {
   const etag = buildMediaETag(cacheKey, buffer.length, contentType);
 
@@ -174,6 +200,22 @@ function createMediaResponse(
     'X-Content-Type-Options': 'nosniff',
     'Vary': 'Cookie',
   };
+
+  if (download) {
+    const extension = (() => {
+      if (contentType.includes('png')) return 'png';
+      if (contentType.includes('jpeg')) return 'jpg';
+      if (contentType.includes('webp')) return 'webp';
+      if (contentType.includes('mp4')) return 'mp4';
+      if (contentType.includes('webm')) return 'webm';
+      if (contentType.includes('quicktime')) return 'mov';
+      if (contentType.includes('mpeg')) return 'mp3';
+      if (contentType.includes('wav')) return 'wav';
+      if (contentType.includes('ogg')) return 'ogg';
+      return 'bin';
+    })();
+    headers['Content-Disposition'] = `attachment; filename=\"${cacheKey}.${extension}\"`;
+  }
 
   if (requestMatchesETag(request, etag)) {
     return new NextResponse(null, {

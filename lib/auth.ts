@@ -38,6 +38,8 @@ export const authOptions: NextAuthOptions = {
           name: user.name,
           role: user.role,
           balance: user.balance,
+          membershipLevel: user.membershipLevel,
+          membershipExpiresAt: user.membershipExpiresAt,
         };
       },
     }),
@@ -56,6 +58,8 @@ export const authOptions: NextAuthOptions = {
         token.id = user.id as string;
         token.role = (user as SafeUser).role;
         token.balance = (user as SafeUser).balance;
+        token.membershipLevel = (user as SafeUser).membershipLevel;
+        token.membershipExpiresAt = (user as SafeUser).membershipExpiresAt;
       }
 
       // 手动触发 session 更新时刷新用户数据
@@ -65,6 +69,8 @@ export const authOptions: NextAuthOptions = {
           token.balance = freshUser.balance;
           token.role = freshUser.role;
           token.name = freshUser.name;
+          token.membershipLevel = freshUser.membershipLevel;
+          token.membershipExpiresAt = freshUser.membershipExpiresAt;
         }
       }
 
@@ -75,6 +81,8 @@ export const authOptions: NextAuthOptions = {
         session.user.id = token.id as string;
         session.user.role = token.role as 'user' | 'admin' | 'moderator';
         session.user.balance = token.balance as number;
+        session.user.membershipLevel = token.membershipLevel as SafeUser['membershipLevel'];
+        session.user.membershipExpiresAt = token.membershipExpiresAt as number | undefined;
         
         // 每次都从数据库获取最新余额，避免缓存导致积分不一致
         try {
@@ -87,6 +95,8 @@ export const authOptions: NextAuthOptions = {
             session.user.balance = freshUser.balance;
             session.user.role = freshUser.role;
             session.user.name = freshUser.name;
+            session.user.membershipLevel = freshUser.membershipLevel;
+            session.user.membershipExpiresAt = freshUser.membershipExpiresAt;
             session.user.disabled = freshUser.disabled;
           }
           // 用户不存在时保持 token 中的缓存值（已在上面设置）

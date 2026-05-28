@@ -1,5 +1,18 @@
 'use client';
 
+function buildDownloadUrl(url: string): string {
+  try {
+    const normalized = new URL(url, window.location.origin);
+    if (normalized.pathname.startsWith('/api/media/')) {
+      normalized.searchParams.set('download', '1');
+      return normalized.toString();
+    }
+    return normalized.toString();
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Converts a base64 data URL to a Blob.
  */
@@ -27,25 +40,51 @@ export async function downloadAsset(url: string, filename: string): Promise<void
   let blob: Blob;
 
   if (url.startsWith('data:')) {
-    // Handle base64 data URL directly
     blob = dataUrlToBlob(url);
   } else {
-    // Fetch remote URL
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Download failed with status ${response.status}`);
+    const requestUrl = buildDownloadUrl(url);
+    try {
+      const response = await fetch(requestUrl, {
+        credentials: 'include',
+        redirect: 'follow',
+      });
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+      blob = await response.blob();
+      if (blob.size === 0) {
+        throw new Error('Downloaded empty file');
+      }
+    } catch (error) {
+      if (requestUrl.startsWith('/api/media/')) {
+        const directLink = document.createElement('a');
+        directLink.href = `${requestUrl}${requestUrl.includes('?') ? '&' : '?'}download=1&open=1`;
+        directLink.target = '_blank';
+        directLink.rel = 'noopener noreferrer';
+        document.body.appendChild(directLink);
+        directLink.click();
+        directLink.remove();
+        return;
+      }
+
+      const fallbackLink = document.createElement('a');
+      fallbackLink.href = requestUrl;
+      fallbackLink.download = filename;
+      fallbackLink.target = '_blank';
+      fallbackLink.rel = 'noopener noreferrer';
+      document.body.appendChild(fallbackLink);
+      fallbackLink.click();
+      fallbackLink.remove();
+      return;
     }
-    blob = await response.blob();
   }
 
   const objectUrl = URL.createObjectURL(blob);
-
   const link = document.createElement('a');
   link.href = objectUrl;
   link.download = filename;
   document.body.appendChild(link);
   link.click();
-
   link.remove();
   URL.revokeObjectURL(objectUrl);
 }

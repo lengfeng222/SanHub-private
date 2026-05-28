@@ -18,7 +18,7 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { fetchReferenceImage } from '@/lib/reference-image';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import type { ChannelType, Generation, GenerationType } from '@/types';
-import { calculateBillingCost } from '@/lib/billing';
+import { resolveImageGenerationCost } from '@/lib/member-pricing';
 
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
@@ -70,25 +70,66 @@ async function processGenerationTask(
   generationParams: Generation['params'],
   publicBaseUrl?: string
 ) {
+  let persistedUpstreamMeta: Record<string, unknown> = {};
+  let lastProgress = typeof generationParams?.progress === 'number' ? generationParams.progress : 0;
+
+  const buildPersistedParams = (
+    progress: number,
+    meta?: Record<string, unknown>
+  ): Generation['params'] => {
+    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+      const normalizedMeta = Object.fromEntries(
+        Object.entries(meta).filter(([, value]) => value !== undefined)
+      );
+
+      if (Object.keys(normalizedMeta).length > 0) {
+        persistedUpstreamMeta = {
+          ...persistedUpstreamMeta,
+          ...normalizedMeta,
+          upstreamUpdatedAt: Date.now(),
+        };
+      }
+    }
+
+    return {
+      ...generationParams,
+      ...persistedUpstreamMeta,
+      progress,
+    };
+  };
+
   try {
     console.log(`[Task ${generationId}] 开始处理图像生成任务`);
 
     await updateGeneration(generationId, {
       status: 'processing',
-      params: {
-        ...generationParams,
-        progress: 10,
-      },
+      params: buildPersistedParams(10),
     });
 
-    const result = await generateImage(request);
+    let lastMetaSignature = '';
+    const onProgress = async (progress: number, meta?: Record<string, unknown>) => {
+      const nextMeta =
+        meta && typeof meta === 'object' && !Array.isArray(meta)
+          ? meta
+          : {};
+      const nextMetaSignature = JSON.stringify(nextMeta);
+
+      if (progress - lastProgress >= 5 || progress >= 100 || nextMetaSignature !== lastMetaSignature) {
+        lastProgress = progress;
+        lastMetaSignature = nextMetaSignature;
+        await updateGeneration(generationId, {
+          params: buildPersistedParams(progress, nextMeta),
+        }).catch((err) => {
+          console.error(`[Task ${generationId}] 更新进度失败:`, err);
+        });
+      }
+    };
+
+    const result = await generateImage(request, onProgress);
 
     await updateGeneration(generationId, {
       status: 'processing',
-      params: {
-        ...generationParams,
-        progress: 80,
-      },
+      params: buildPersistedParams(Math.max(lastProgress, 80)),
     });
 
     // 保存到图床或本地
@@ -99,19 +140,53 @@ async function processGenerationTask(
     await updateGeneration(generationId, {
       status: 'completed',
       resultUrl: savedUrl,
-      params: {
-        ...generationParams,
-        progress: 100,
-      },
+      errorMessage: '',
+      params: buildPersistedParams(100, {
+        upstreamFinal: true,
+        upstreamResultUrl: result.url,
+      }),
     });
 
     console.log(`[Task ${generationId}] 任务完成`);
   } catch (error) {
     console.error(`[Task ${generationId}] 任务失败:`, error);
 
+    const errorMessage = error instanceof Error ? error.message : '生成失败';
+    const failedParams = buildPersistedParams(Math.max(lastProgress, 10));
+
+    if (
+      errorMessage.includes('灵刻媒体图片任务超时') &&
+      typeof failedParams.upstreamTaskId === 'string' &&
+      failedParams.upstreamTaskId.trim()
+    ) {
+      failedParams.upstreamStatusGroup = 'timeout';
+      failedParams.upstreamState =
+        typeof failedParams.upstreamState === 'string' && failedParams.upstreamState.trim()
+          ? failedParams.upstreamState
+          : 'processing';
+      failedParams.upstreamStatus =
+        typeof failedParams.upstreamStatus === 'string' && failedParams.upstreamStatus.trim()
+          ? failedParams.upstreamStatus
+          : '上游仍在处理中';
+      failedParams.upstreamProgress =
+        typeof failedParams.upstreamProgress === 'number'
+          ? Math.min(Math.max(failedParams.upstreamProgress, 10), 95)
+          : Math.min(Math.max(lastProgress, 10), 95);
+
+      await updateGeneration(generationId, {
+        status: 'processing',
+        errorMessage: '',
+        params: failedParams,
+      }).catch((updateErr) => {
+        console.error(`[Task ${generationId}] 更新超时状态失败:`, updateErr);
+      });
+      return;
+    }
+
     await updateGeneration(generationId, {
       status: 'failed',
-      errorMessage: error instanceof Error ? error.message : '生成失败',
+      errorMessage,
+      params: failedParams,
     });
 
     try {
@@ -179,13 +254,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '模型已禁用' }, { status: 400 });
     }
 
-    const actualCost = calculateBillingCost({
-      billingMode: model.billingMode,
-      billingPrice: model.billingPrice,
-      billingUnit: model.billingUnit,
-      legacyCost: model.costPerGeneration,
-    });
-
     const resolvedTarget = resolveImageTarget(
       model.apiModel,
       model.resolutions,
@@ -201,6 +269,14 @@ export async function POST(request: NextRequest) {
     if (user.disabled) {
       return NextResponse.json({ error: '账号已被禁用' }, { status: 403 });
     }
+
+    const actualCost = resolveImageGenerationCost({
+      user,
+      model,
+      imageSize,
+      aspectRatio,
+      quality,
+    });
 
     const creationKey = clientRequestId ? `${user.id}:${clientRequestId}` : '';
     const pendingCreation = creationKey ? imageTaskCreationPromises.get(creationKey) : undefined;

@@ -32,8 +32,28 @@ async function ensureMediaDir(): Promise<void> {
   await fsp.mkdir(MEDIA_DIR, { recursive: true });
 }
 
+function resolvePublicRuntimeMediaDirs(): string[] {
+  const dirs = new Set<string>();
+  dirs.add(path.resolve(process.cwd(), 'public', 'runtime-media'));
+
+  const cwd = path.resolve(process.cwd());
+  if (cwd.endsWith(path.join('.next', 'standalone'))) {
+    dirs.add(path.resolve(cwd, '..', '..', 'public', 'runtime-media'));
+  } else {
+    dirs.add(path.resolve(cwd, '.next', 'standalone', 'public', 'runtime-media'));
+  }
+
+  return Array.from(dirs);
+}
+
 async function ensurePublicRuntimeMediaDir(): Promise<void> {
-  await fsp.mkdir(PUBLIC_RUNTIME_MEDIA_DIR, { recursive: true });
+  await Promise.all(
+    resolvePublicRuntimeMediaDirs().map((dir) => fsp.mkdir(dir, { recursive: true }))
+  );
+}
+
+export function getPublicRuntimeMediaDir(): string {
+  return PUBLIC_RUNTIME_MEDIA_DIR;
 }
 
 // 从 data URL 中提取 mime 类型和数据
@@ -74,6 +94,10 @@ function isRemoteUrl(value: string): boolean {
 function sanitizeFilename(filename: string): string {
   const base = path.basename(filename || '');
   return base.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+export function sanitizeRuntimeMediaFilename(filename: string): string {
+  return sanitizeFilename(filename);
 }
 
 function normalizePublicBaseUrl(raw?: string): string | null {
@@ -202,22 +226,34 @@ export async function saveMediaAsync(
   const configuredBucket = await resolveDefaultImageBucket();
 
   if (isRemoteUrl(dataUrl)) {
-    if (!configuredBucket) {
-      return dataUrl;
-    }
-
     try {
       const remote = await downloadRemoteMedia(dataUrl);
       const filename = options.filename || filenameFromUrl(id, dataUrl, remote.mimeType);
-      const uploadedUrl = await uploadBufferToImageBucket(
-        remote.buffer,
-        remote.mimeType,
+
+      if (configuredBucket) {
+        try {
+          const uploadedUrl = await uploadBufferToImageBucket(
+            remote.buffer,
+            remote.mimeType,
+            filename,
+            { publicBaseUrl: options.publicBaseUrl }
+          );
+          if (uploadedUrl) {
+            console.log(`[MediaStorage] Cached remote media to bucket: ${uploadedUrl}`);
+            return uploadedUrl;
+          }
+        } catch (bucketError) {
+          console.warn('[MediaStorage] Remote bucket cache failed, falling back to local runtime media:', bucketError);
+        }
+      }
+
+      const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, {
+        ...options,
         filename,
-        { publicBaseUrl: options.publicBaseUrl }
-      );
-      if (uploadedUrl) {
-        console.log(`[MediaStorage] Cached remote media to bucket: ${uploadedUrl}`);
-        return uploadedUrl;
+      });
+      if (runtimeUrl) {
+        console.log(`[MediaStorage] Cached remote media to runtime media: ${runtimeUrl}`);
+        return runtimeUrl;
       }
     } catch (error) {
       console.warn('[MediaStorage] Remote media cache failed, keeping original URL:', error);
@@ -242,11 +278,22 @@ export async function saveMediaAsync(
         return picuiUrl;
       }
     } catch (error) {
-      console.warn('[MediaStorage] Remote upload failed, keeping data URL:', error);
+      console.warn('[MediaStorage] Remote upload failed, falling back to local runtime media:', error);
     }
 
-    // 已配置远程桶时不再落本地，避免 S3/PicUI 开启后继续占用本地磁盘。
+    const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, options);
+    if (runtimeUrl) {
+      console.log(`[MediaStorage] Saved media to runtime media: ${runtimeUrl}`);
+      return runtimeUrl;
+    }
+
     return dataUrl;
+  }
+
+  const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, options);
+  if (runtimeUrl) {
+    console.log(`[MediaStorage] Saved media to runtime media: ${runtimeUrl}`);
+    return runtimeUrl;
   }
 
   // 回退到本地文件存储
@@ -286,10 +333,69 @@ export async function saveMediaToPublicFile(
   const filename = sanitizeFilename(
     options.filename || `${id}.${getExtension(mimeType)}`
   );
-  const filepath = path.join(PUBLIC_RUNTIME_MEDIA_DIR, filename);
-  await fsp.writeFile(filepath, buffer);
+  const runtimeDirs = resolvePublicRuntimeMediaDirs();
+  await Promise.all(
+    runtimeDirs.map((dir) => fsp.writeFile(path.join(dir, filename), buffer))
+  );
 
-  return `${publicBaseUrl}/runtime-media/${encodeURIComponent(filename)}`;
+  return `${publicBaseUrl}/api/runtime-media/${encodeURIComponent(filename)}`;
+}
+
+export async function readPublicRuntimeMediaFile(
+  filename: string
+): Promise<{ buffer: Buffer; mimeType: string; filename: string } | null> {
+  try {
+    const safeFilename = sanitizeFilename(filename);
+    if (!safeFilename) {
+      return null;
+    }
+
+    let buffer: Buffer | null = null;
+    for (const dir of resolvePublicRuntimeMediaDirs()) {
+      const filepath = path.join(dir, safeFilename);
+      try {
+        buffer = await fsp.readFile(filepath);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+    }
+
+    if (!buffer) {
+      return null;
+    }
+
+    const ext = path.extname(safeFilename).slice(1).toLowerCase();
+
+    const mimeTypes: Record<string, string> = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+      mp4: 'video/mp4',
+      webm: 'video/webm',
+      mov: 'video/quicktime',
+      mp3: 'audio/mpeg',
+      wav: 'audio/wav',
+      ogg: 'audio/ogg',
+      txt: 'text/plain; charset=utf-8',
+    };
+
+    return {
+      buffer,
+      mimeType: mimeTypes[ext] || 'application/octet-stream',
+      filename: safeFilename,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    console.error('[MediaStorage] Failed to read runtime media file:', error);
+    return null;
+  }
 }
 
 /**

@@ -1,14 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { createVideoModel, getVideoChannel, getVideoModels } from '@/lib/db';
+import { createVideoModel, getVideoChannel, getVideoModels, updateVideoModel } from '@/lib/db';
 import {
   buildVideoModelDescription,
+  estimateVideoDurationCost,
   getVeoDisplayName,
   getVeoGroupKey,
+  inferVideoBillingProfile,
   isVeoApiModel,
 } from '@/lib/video-model-normalizer';
-import type { VideoChannel, VideoDuration, VideoModelFeatures } from '@/types';
+import type { BillingMode, VideoChannel, VideoConfigObject, VideoDuration, VideoModelFeatures, VideoPricingRule } from '@/types';
+import type { LingkeSyncedVideoModel } from '@/lib/lingke-video-pricing';
+import { fetchLingkeSyncedVideoModelsForChannel, getLingkeVideoAliases } from '@/lib/lingke-video-sync';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,12 +21,19 @@ type RemoteModel = {
   owned_by?: string;
   type?: string;
   modality?: string;
+  description?: string;
+  pricing?: unknown;
+  billing?: unknown;
+  price?: unknown;
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
 };
 
 type VideoCategory = 't2v' | 'i2v' | 'r2v' | 'interpolation' | 'upsample';
 
 type ClassifiedVideoModel = {
   apiModel: string;
+  matchKeys?: string[];
   name: string;
   description: string;
   category: VideoCategory;
@@ -32,12 +43,23 @@ type ClassifiedVideoModel = {
   defaultAspectRatio: string;
   durations: VideoDuration[];
   defaultDuration: string;
+  billingMode: BillingMode;
+  billingPrice: number;
+  billingUnit: number;
+  normalPrice?: number;
+  vipPrice?: number;
+  svipPrice?: number;
+  pricingRules?: VideoPricingRule[];
+  videoConfigObject?: VideoConfigObject;
+  imageUrl?: string;
+  highlight?: boolean;
   sourceModelIds?: string[];
 };
 
 type ImportRequestBody = {
   channelId?: string;
   modelIds?: string[];
+  overwrite?: boolean;
 };
 
 const CATEGORY_ORDER: Record<VideoCategory, number> = {
@@ -129,7 +151,8 @@ function buildLocalizedName(params: {
   return `${categoryLabel}（${params.orientationZh} ${params.seconds}秒）${params.versionLabel} ${params.tierLabel}`;
 }
 
-function classifyFlow2ApiModel(modelId: string): ClassifiedVideoModel | null {
+function classifyFlow2ApiModel(model: RemoteModel): ClassifiedVideoModel | null {
+  const modelId = model.id;
   const lower = modelId.toLowerCase();
   if (!lower.startsWith('veo_')) return null;
 
@@ -148,12 +171,31 @@ function classifyFlow2ApiModel(modelId: string): ClassifiedVideoModel | null {
   else category = 't2v';
 
   const seconds = inferDurationSeconds(modelId);
-  const cost = inferDurationCost(modelId, category, seconds);
   const duration = `${seconds}s`;
   const aspectRatio = inferAspectRatio(modelId);
   const outputResolution = inferOutputResolution(modelId);
   const versionLabel = inferVeoVersionLabel(modelId);
   const tierLabel = inferModelTierLabel(modelId);
+  const legacyCost = inferDurationCost(modelId, category, seconds);
+  let billing = inferVideoBillingProfile({
+    channelType: 'flow2api',
+    apiModel: modelId,
+    remoteModel: model,
+    fallbackMode: 'per_second',
+    fallbackPrice: 12,
+    fallbackUnit: 1,
+  });
+
+  if (category === 'upsample' && billing.inferredFrom !== 'remote') {
+    billing = {
+      billingMode: 'per_call',
+      billingPrice: legacyCost,
+      billingUnit: 1,
+      inferredFrom: 'heuristic',
+    };
+  }
+
+  const cost = estimateVideoDurationCost(duration, billing, legacyCost);
 
   const features: VideoModelFeatures = {
     textToVideo: true,
@@ -191,6 +233,9 @@ function classifyFlow2ApiModel(modelId: string): ClassifiedVideoModel | null {
     defaultAspectRatio: aspectRatio.value,
     durations: [{ value: duration, label: `${seconds} 秒`, cost }],
     defaultDuration: duration,
+    billingMode: billing.billingMode,
+    billingPrice: billing.billingPrice,
+    billingUnit: billing.billingUnit,
   };
 }
 
@@ -209,6 +254,15 @@ function classifyApexerApiModel(model: RemoteModel): ClassifiedVideoModel | null
   if (!isApexerVideoRemoteModel(model)) return null;
 
   const apiModel = model.id === 'sora' ? 'sora-2' : model.id;
+  const billing = inferVideoBillingProfile({
+    channelType: 'apexerapi',
+    apiModel,
+    remoteModel: model,
+    fallbackMode: 'per_call',
+    fallbackPrice: 96,
+    fallbackUnit: 1,
+  });
+
   return {
     apiModel,
     name: apiModel === 'sora-2' ? 'Sora 2' : `Sora (${apiModel})`,
@@ -227,17 +281,72 @@ function classifyApexerApiModel(model: RemoteModel): ClassifiedVideoModel | null
     ],
     defaultAspectRatio: 'landscape',
     durations: [
-      { value: '8s', label: '8 秒', cost: 100 },
-      { value: '12s', label: '12 秒', cost: 150 },
-      { value: '20s', label: '20 秒', cost: 200 },
+      {
+        value: '8s',
+        label: '8 秒',
+        cost: estimateVideoDurationCost('8s', billing, billing.billingPrice),
+      },
+      {
+        value: '12s',
+        label: '12 秒',
+        cost: estimateVideoDurationCost('12s', billing, billing.billingPrice),
+      },
+      {
+        value: '20s',
+        label: '20 秒',
+        cost: estimateVideoDurationCost('20s', billing, billing.billingPrice),
+      },
     ],
     defaultDuration: '8s',
+    billingMode: billing.billingMode,
+    billingPrice: billing.billingPrice,
+    billingUnit: billing.billingUnit,
+  };
+}
+
+
+function mapLingkeModelToClassified(model: LingkeSyncedVideoModel): ClassifiedVideoModel {
+  return {
+    apiModel: model.apiModel,
+    matchKeys: model.matchKeys,
+    name: model.name,
+    description: model.description,
+    category: model.features.videoToVideo
+      ? 'upsample'
+      : model.videoConfigObject?.extra_params?.upload_mode === 'first_last_frame'
+        ? 'interpolation'
+        : model.features.imageToVideo
+          ? 'i2v'
+          : 't2v',
+    categoryLabel: model.features.videoToVideo
+      ? '视频编辑'
+      : model.videoConfigObject?.extra_params?.upload_mode === 'first_last_frame'
+        ? '首尾帧视频'
+        : model.features.imageToVideo
+          ? '图生视频'
+          : '文生视频',
+    features: model.features,
+    aspectRatios: model.aspectRatios,
+    defaultAspectRatio: model.defaultAspectRatio,
+    durations: model.durations,
+    defaultDuration: model.defaultDuration,
+    billingMode: model.billingMode,
+    billingPrice: model.billingPrice,
+    billingUnit: model.billingUnit,
+    normalPrice: model.normalPrice,
+    vipPrice: model.vipPrice,
+    svipPrice: model.svipPrice,
+    pricingRules: model.pricingRules,
+    videoConfigObject: model.videoConfigObject,
+    imageUrl: model.imageUrl,
+    highlight: model.highlight,
   };
 }
 
 function classifyRemoteVideoModels(
   channelType: VideoChannel['type'],
-  remoteModels: RemoteModel[]
+  remoteModels: RemoteModel[],
+  lingkeModels: LingkeSyncedVideoModel[] = [],
 ): ClassifiedVideoModel[] {
   if (channelType === 'apexerapi') {
     return sortClassifiedModels(
@@ -247,10 +356,14 @@ function classifyRemoteVideoModels(
     );
   }
 
+  if (channelType === 'lingke-media') {
+    return sortClassifiedModels(lingkeModels.map(mapLingkeModelToClassified));
+  }
+
   return sortClassifiedModels(
-    remoteModels
-      .map((model) => classifyFlow2ApiModel(model.id))
-      .filter((model): model is ClassifiedVideoModel => Boolean(model))
+      remoteModels
+        .map((model) => classifyFlow2ApiModel(model))
+        .filter((model): model is ClassifiedVideoModel => Boolean(model))
   );
 }
 
@@ -330,6 +443,8 @@ function mergeClassifiedModels(models: ClassifiedVideoModel[]): ClassifiedVideoM
     }
 
     const representativeApiModel = pickRepresentativeModelId(groupModels);
+    const representative =
+      groupModels.find((model) => model.apiModel === representativeApiModel) || groupModels[0];
     const aspectRatios = uniqueAspectRatios(groupModels);
     const features = mergeGroupedFeatures(groupModels);
     const defaultAspectRatio = aspectRatios.some((ratio) => ratio.value === 'landscape')
@@ -349,8 +464,27 @@ function mergeClassifiedModels(models: ClassifiedVideoModel[]): ClassifiedVideoM
       features,
       aspectRatios,
       defaultAspectRatio,
-      durations: [{ value: '8s', label: '8 秒', cost: 100 }],
+      durations: [
+        {
+          value: '8s',
+          label: '8 秒',
+          cost: estimateVideoDurationCost(
+            '8s',
+            representative.billingMode === 'per_1k_tokens'
+              ? { billingMode: 'per_call', billingPrice: representative.billingPrice, billingUnit: 1 }
+              : {
+                  billingMode: representative.billingMode,
+                  billingPrice: representative.billingPrice,
+                  billingUnit: representative.billingUnit,
+                },
+            representative.durations[0]?.cost || 100,
+          ),
+        },
+      ],
       defaultDuration: '8s',
+      billingMode: representative.billingMode,
+      billingPrice: representative.billingPrice,
+      billingUnit: representative.billingUnit,
       sourceModelIds: groupModels.map((model) => model.apiModel),
     };
   });
@@ -366,14 +500,31 @@ function getClassifiedModelSelectionId(model: ClassifiedVideoModel): string {
 async function fetchChannelRemoteModels(channelId: string): Promise<{
   channelType: VideoChannel['type'];
   models: RemoteModel[];
+  lingkeModels?: LingkeSyncedVideoModel[];
 }> {
   const channel = await getVideoChannel(channelId);
   if (!channel) {
     throw new Error('渠道不存在');
   }
-  if (channel.type !== 'flow2api' && channel.type !== 'apexerapi') {
-    throw new Error('仅支持 Flow2API / ApexerAPI 渠道一键导入');
+  if (channel.type !== 'flow2api' && channel.type !== 'apexerapi' && channel.type !== 'lingke-media') {
+    throw new Error('仅支持 Flow2API / ApexerAPI / 灵刻媒体 渠道一键导入');
   }
+  if (channel.type === 'lingke-media') {
+    const lingkeModels = await fetchLingkeSyncedVideoModelsForChannel({
+      baseUrl: channel.baseUrl,
+      apiKey: channel.apiKey,
+    });
+    return {
+      channelType: channel.type,
+      models: lingkeModels.map((item) => ({
+        id: item.apiModel,
+        name: item.name,
+        imageUrl: item.imageUrl,
+      } as RemoteModel)),
+      lingkeModels,
+    };
+  }
+
   if (!channel.baseUrl) {
     throw new Error('该渠道未配置 Base URL');
   }
@@ -402,6 +553,7 @@ async function fetchChannelRemoteModels(channelId: string): Promise<{
   return {
     channelType: channel.type,
     models: Array.isArray(models) ? models : [],
+    lingkeModels: [],
   };
 }
 
@@ -425,14 +577,15 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '缺少 channelId' }, { status: 400 });
     }
 
-    const { channelType, models: remoteModels } = await fetchChannelRemoteModels(channelId);
-    const classified = mergeClassifiedModels(classifyRemoteVideoModels(channelType, remoteModels));
+    const { channelType, models: remoteModels, lingkeModels = [] } = await fetchChannelRemoteModels(channelId);
+    const classified = mergeClassifiedModels(classifyRemoteVideoModels(channelType, remoteModels, lingkeModels));
 
     const existingModels = await getVideoModels();
     const existingApiModelSet = new Set(
       existingModels
         .filter((model) => model.channelId === channelId)
-        .map((model) => model.apiModel)
+        .flatMap((model) => getLingkeVideoAliases(model.apiModel, model.name))
+        .map((value) => value.toLowerCase())
     );
 
     return NextResponse.json({
@@ -448,9 +601,18 @@ export async function GET(request: NextRequest) {
           categoryLabel: model.categoryLabel,
           defaultAspectRatio: model.defaultAspectRatio,
           defaultDuration: model.defaultDuration,
+          billingMode: model.billingMode,
+          billingPrice: model.billingPrice,
+          billingUnit: model.billingUnit,
+          normalPrice: model.normalPrice,
+          vipPrice: model.vipPrice,
+          svipPrice: model.svipPrice,
+          pricingRules: model.pricingRules || [],
+          imageUrl: model.imageUrl,
           alreadyImported:
-            existingApiModelSet.has(model.apiModel) ||
-            (model.sourceModelIds || []).some((sourceModelId) => existingApiModelSet.has(sourceModelId)),
+            getLingkeVideoAliases(model.apiModel, model.name, ...(model.matchKeys || []))
+              .some((key) => existingApiModelSet.has(key.toLowerCase())) ||
+            (model.sourceModelIds || []).some((sourceModelId) => existingApiModelSet.has(sourceModelId.toLowerCase())),
         })),
       },
     });
@@ -477,8 +639,9 @@ export async function POST(request: NextRequest) {
     }
 
     const selectedModelIds = parseSelectedModelIds(body);
-    const { channelType, models: remoteModels } = await fetchChannelRemoteModels(channelId);
-    let classified = classifyRemoteVideoModels(channelType, remoteModels);
+    const overwrite = body.overwrite === true;
+    const { channelType, models: remoteModels, lingkeModels = [] } = await fetchChannelRemoteModels(channelId);
+    let classified = classifyRemoteVideoModels(channelType, remoteModels, lingkeModels);
 
     if (selectedModelIds.size > 0) {
       classified = classified.filter(
@@ -498,27 +661,62 @@ export async function POST(request: NextRequest) {
     }
 
     const existing = await getVideoModels();
-    const existingApiModels = new Set(
-      existing
-        .filter((model) => model.channelId === channelId)
-        .map((model) => model.apiModel)
-    );
-    const existingCount = existing.filter((model) => model.channelId === channelId).length;
+    const existingForChannel = existing.filter((model) => model.channelId === channelId);
+    const existingApiModels = new Set(existingForChannel.map((model) => model.apiModel));
+    const existingCount = existingForChannel.length;
 
     let created = 0;
+    let updated = 0;
     let skipped = 0;
     const failed: string[] = [];
 
     for (const model of classified) {
       const sourceModelIds = model.sourceModelIds || [model.apiModel];
-      if (
-        existingApiModels.has(model.apiModel) ||
-        sourceModelIds.some((sourceModelId) => existingApiModels.has(sourceModelId))
-      ) {
-        skipped += 1;
-        continue;
-      }
+      const matchKeys = getLingkeVideoAliases(
+        model.apiModel,
+        model.name,
+        ...(model.matchKeys || []),
+        ...sourceModelIds,
+      ).map((value) => value.toLowerCase());
+      const matchedExisting = existingForChannel.find((item) =>
+        getLingkeVideoAliases(item.apiModel, item.name)
+          .some((candidate) => matchKeys.includes(candidate.toLowerCase()))
+      );
+
       try {
+        if (matchedExisting) {
+          if (!overwrite && channelType !== 'lingke-media') {
+            skipped += 1;
+            continue;
+          }
+
+          await updateVideoModel(matchedExisting.id, {
+            name: model.name,
+            description: model.description,
+            apiModel: model.apiModel,
+            features: model.features,
+            aspectRatios: model.aspectRatios,
+            durations: model.durations,
+            defaultAspectRatio: model.defaultAspectRatio,
+            defaultDuration: model.defaultDuration,
+            billingMode: model.billingMode,
+            billingPrice: model.billingPrice,
+            billingUnit: model.billingUnit,
+            normalPrice: model.normalPrice,
+            vipPrice: model.vipPrice,
+            svipPrice: model.svipPrice,
+            pricingRules: model.pricingRules || [],
+            videoConfigObject: model.videoConfigObject,
+            imageUrl: model.imageUrl,
+            highlight: model.highlight ?? matchedExisting.highlight,
+            enabled: true,
+          });
+          existingApiModels.add(model.apiModel);
+          sourceModelIds.forEach((sourceModelId) => existingApiModels.add(sourceModelId));
+          updated += 1;
+          continue;
+        }
+
         await createVideoModel({
           channelId,
           name: model.name,
@@ -529,7 +727,16 @@ export async function POST(request: NextRequest) {
           durations: model.durations,
           defaultAspectRatio: model.defaultAspectRatio,
           defaultDuration: model.defaultDuration,
-          highlight: false,
+          billingMode: model.billingMode,
+          billingPrice: model.billingPrice,
+          billingUnit: model.billingUnit,
+          normalPrice: model.normalPrice,
+          vipPrice: model.vipPrice,
+          svipPrice: model.svipPrice,
+          pricingRules: model.pricingRules || [],
+          videoConfigObject: model.videoConfigObject,
+          imageUrl: model.imageUrl,
+          highlight: model.highlight ?? false,
           enabled: true,
           sortOrder: existingCount + created,
         });
@@ -537,7 +744,6 @@ export async function POST(request: NextRequest) {
         sourceModelIds.forEach((sourceModelId) => existingApiModels.add(sourceModelId));
         created += 1;
       } catch {
-        skipped += 1;
         failed.push(model.apiModel);
       }
     }
@@ -547,6 +753,7 @@ export async function POST(request: NextRequest) {
       data: {
         total: classified.length,
         created,
+        updated,
         skipped,
         failed,
       },

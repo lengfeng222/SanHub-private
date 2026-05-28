@@ -4,28 +4,37 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  CheckSquare,
   CircleAlert,
   Clock3,
+  Download,
   ExternalLink,
   Headphones,
   Image as ImageIcon,
   Loader2,
   Play,
+  Square,
   Trash2,
   User,
   Video,
+  X,
 } from 'lucide-react';
-import type { Generation, SafeVideoModel } from '@/types';
+import type { CharacterCard, Generation, SafeVideoModel } from '@/types';
 import { resolveVideoModelLabel } from '@/lib/video-model-label';
 import { cn } from '@/lib/utils';
+import { downloadAsset } from '@/lib/download';
+import { deleteGenerationRecords } from '@/lib/generation-client';
 
-const tabs = [
+type HistoryTabKey = 'all' | 'video' | 'image' | 'audio' | 'character';
+type HistoryEntry = Generation & { source: 'generation' | 'character-card' };
+
+const tabs: Array<{ key: HistoryTabKey; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'video', label: '视频' },
   { key: 'image', label: '图像' },
   { key: 'audio', label: '音频' },
   { key: 'character', label: '角色卡' },
-] as const;
+];
 
 const statusLabelMap: Record<Generation['status'], string> = {
   pending: '排队中',
@@ -35,23 +44,23 @@ const statusLabelMap: Record<Generation['status'], string> = {
   cancelled: '已取消',
 };
 
-function isVideoItem(item: Generation) {
+function isVideoItem(item: HistoryEntry) {
   return item.type.includes('video');
 }
 
-function isImageItem(item: Generation) {
+function isImageItem(item: HistoryEntry) {
   return item.type.includes('image');
 }
 
-function isAudioItem(item: Generation) {
+function isAudioItem(item: HistoryEntry) {
   return item.type === 'music' || item.type === 'voice';
 }
 
-function isCharacterItem(item: Generation) {
+function isCharacterItem(item: HistoryEntry) {
   return item.type === 'character-card';
 }
 
-function getTypeLabel(item: Generation) {
+function getTypeLabel(item: HistoryEntry) {
   if (isVideoItem(item)) return '视频';
   if (isImageItem(item)) return '图像';
   if (isAudioItem(item)) return '音频';
@@ -74,25 +83,76 @@ function getStatusBadgeClass(status: Generation['status']) {
   }
 }
 
+function characterCardToEntry(card: CharacterCard): HistoryEntry {
+  return {
+    id: card.id,
+    userId: card.userId,
+    type: 'character-card',
+    prompt: card.characterName || '角色卡',
+    params: {
+      model: '角色卡',
+      sourceVideoUrl: card.sourceVideoUrl,
+    } as Generation['params'],
+    resultUrl: card.avatarUrl || '',
+    cost: 0,
+    status: card.status,
+    errorMessage: card.errorMessage,
+    createdAt: card.createdAt,
+    updatedAt: card.updatedAt,
+    source: 'character-card',
+  };
+}
+
+function getDownloadExtension(item: HistoryEntry) {
+  if (isAudioItem(item)) {
+    if (typeof item.params?.format === 'string' && item.params.format.trim()) {
+      return item.params.format.trim().toLowerCase();
+    }
+    return 'mp3';
+  }
+  if (isVideoItem(item)) return 'mp4';
+  return 'png';
+}
+
 export default function HistoryPage() {
-  const [items, setItems] = useState<Generation[]>([]);
+  const [items, setItems] = useState<HistoryEntry[]>([]);
   const [videoModels, setVideoModels] = useState<Pick<SafeVideoModel, 'id' | 'name'>[]>([]);
-  const [filter, setFilter] = useState<(typeof tabs)[number]['key']>('all');
+  const [filter, setFilter] = useState<HistoryTabKey>('all');
   const [loading, setLoading] = useState(true);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [previewItem, setPreviewItem] = useState<HistoryEntry | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [historyRes, videoModelsRes] = await Promise.allSettled([
+      const [historyRes, videoModelsRes, characterCardsRes] = await Promise.allSettled([
         fetch('/api/user/history?limit=50', { cache: 'no-store' }),
         fetch('/api/video-models', { cache: 'no-store' }),
+        fetch('/api/user/character-cards?limit=50', { cache: 'no-store' }),
       ]);
+
+      const nextItems: HistoryEntry[] = [];
 
       if (historyRes.status === 'fulfilled') {
         const historyData = await historyRes.value.json().catch(() => ({}));
         if (historyRes.value.ok) {
-          setItems(historyData.data || []);
+          nextItems.push(...((historyData.data || []) as Generation[]).map((item) => ({
+            ...item,
+            source: 'generation' as const,
+          })));
         }
       }
+
+      if (characterCardsRes.status === 'fulfilled') {
+        const cardsData = await characterCardsRes.value.json().catch(() => ({}));
+        if (characterCardsRes.value.ok) {
+          nextItems.push(...((cardsData.data || []) as CharacterCard[]).map(characterCardToEntry));
+        }
+      }
+
+      nextItems.sort((a, b) => b.createdAt - a.createdAt);
+      setItems(nextItems);
 
       if (videoModelsRes.status === 'fulfilled') {
         const modelsData = await videoModelsRes.value.json().catch(() => ({}));
@@ -127,6 +187,16 @@ export default function HistoryPage() {
     };
   }, [load]);
 
+  useEffect(() => {
+    setSelectedIds((prev) => prev.filter((id) => items.some((item) => item.id === id)));
+    if (selectionMode && items.length === 0) {
+      setSelectionMode(false);
+    }
+    if (previewItem && !items.some((item) => item.id === previewItem.id)) {
+      setPreviewItem(null);
+    }
+  }, [items, previewItem, selectionMode]);
+
   const stats = useMemo(() => {
     const total = items.length;
     const video = items.filter((item) => isVideoItem(item)).length;
@@ -156,7 +226,22 @@ export default function HistoryPage() {
     [videoModels]
   );
 
-  const getModelLabel = (item: Generation) => {
+  const selectedItems = useMemo(
+    () => items.filter((item) => selectedIds.includes(item.id)),
+    [items, selectedIds]
+  );
+
+  const selectedMediaIds = useMemo(
+    () => selectedItems.filter((item) => item.source === 'generation').map((item) => item.id),
+    [selectedItems]
+  );
+
+  const selectedCharacterIds = useMemo(
+    () => selectedItems.filter((item) => item.source === 'character-card').map((item) => item.id),
+    [selectedItems]
+  );
+
+  const getModelLabel = (item: HistoryEntry) => {
     if (isVideoItem(item)) {
       return resolveVideoModelLabel({
         modelId: typeof item.params?.modelId === 'string' ? item.params.modelId : undefined,
@@ -175,7 +260,7 @@ export default function HistoryPage() {
     return item.type;
   };
 
-  const getUpstreamStatusLabel = (item: Generation) => {
+  const getUpstreamStatusLabel = (item: HistoryEntry) => {
     if (typeof item.params?.upstreamStatus === 'string' && item.params.upstreamStatus.trim()) {
       return item.params.upstreamStatus.trim();
     }
@@ -185,7 +270,144 @@ export default function HistoryPage() {
     return '';
   };
 
-  const renderPreview = (item: Generation) => {
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  }, []);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    setSelectionMode((prev) => {
+      if (prev) {
+        setSelectedIds([]);
+      }
+      return !prev;
+    });
+  }, []);
+
+  const handleSelectAllFiltered = useCallback(() => {
+    setSelectedIds((prev) => {
+      const filteredIds = filtered.map((item) => item.id);
+      const allSelected = filteredIds.length > 0 && filteredIds.every((id) => prev.includes(id));
+      if (allSelected) {
+        return prev.filter((id) => !filteredIds.includes(id));
+      }
+      return Array.from(new Set([...prev, ...filteredIds]));
+    });
+  }, [filtered]);
+
+  const deleteCharacterCards = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) return;
+    await Promise.all(
+      ids.map(async (id) => {
+        const response = await fetch('/api/user/character-cards', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cardId: id }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || '删除角色卡失败');
+        }
+      })
+    );
+  }, []);
+
+  const handleDeleteSelected = useCallback(async () => {
+    if (busy || selectedIds.length === 0) return;
+    const confirmed = window.confirm(`确认删除选中的 ${selectedIds.length} 项作品吗？`);
+    if (!confirmed) return;
+
+    const snapshot = items;
+    setBusy(true);
+    setItems((prev) => prev.filter((item) => !selectedIds.includes(item.id)));
+    setSelectedIds([]);
+    setPreviewItem((prev) => (prev && selectedIds.includes(prev.id) ? null : prev));
+
+    try {
+      if (selectedMediaIds.length > 0) {
+        await deleteGenerationRecords(selectedMediaIds);
+      }
+      if (selectedCharacterIds.length > 0) {
+        await deleteCharacterCards(selectedCharacterIds);
+      }
+    } catch (error) {
+      console.error('[HistoryPage] 批量删除失败:', error);
+      setItems(snapshot);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, deleteCharacterCards, items, load, selectedCharacterIds, selectedIds, selectedMediaIds]);
+
+  const handleClearMedia = useCallback(async () => {
+    if (busy) return;
+    const confirmed = window.confirm('确认清空全部媒体作品吗？这会删除视频、图像和音频记录，包含进行中的任务。');
+    if (!confirmed) return;
+
+    const snapshot = items;
+    setBusy(true);
+    setItems((prev) => prev.filter((item) => item.source === 'character-card'));
+    setSelectedIds([]);
+    setPreviewItem((prev) => (prev && prev.source === 'generation' ? null : prev));
+
+    try {
+      const response = await fetch('/api/user/history/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'all' }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || '清空媒体失败');
+      }
+      setSelectionMode(false);
+    } catch (error) {
+      console.error('[HistoryPage] 清空媒体失败:', error);
+      setItems(snapshot);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, items, load]);
+
+  const handleClearCharacterCards = useCallback(async () => {
+    if (busy) return;
+    const confirmed = window.confirm('确认清空全部角色卡吗？');
+    if (!confirmed) return;
+
+    const snapshot = items;
+    setBusy(true);
+    setItems((prev) => prev.filter((item) => item.source !== 'character-card'));
+    setSelectedIds((prev) => prev.filter((id) => !selectedCharacterIds.includes(id)));
+    setPreviewItem((prev) => (prev && prev.source === 'character-card' ? null : prev));
+
+    try {
+      const response = await fetch('/api/user/character-cards/delete-all', {
+        method: 'POST',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || '清空角色卡失败');
+      }
+      setSelectionMode(false);
+    } catch (error) {
+      console.error('[HistoryPage] 清空角色卡失败:', error);
+      setItems(snapshot);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, items, load, selectedCharacterIds]);
+
+  const handleDownload = useCallback(async (item: HistoryEntry) => {
+    if (!item.resultUrl) return;
+    try {
+      await downloadAsset(item.resultUrl, `sanhub-${item.id}.${getDownloadExtension(item)}`);
+    } catch (error) {
+      console.error('[HistoryPage] 下载失败:', error);
+    }
+  }, []);
+
+  const renderPreview = (item: HistoryEntry) => {
     if (item.status === 'pending' || item.status === 'processing') {
       const upstreamLabel = getUpstreamStatusLabel(item);
       return (
@@ -261,7 +483,7 @@ export default function HistoryPage() {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 px-4 text-white/75">
           <Headphones className="h-8 w-8" />
-          <audio controls src={item.resultUrl} className="w-full max-w-[90%]" />
+          <audio controls src={item.resultUrl} className="w-full max-w-[90%]" onClick={(e) => e.stopPropagation()} />
         </div>
       );
     }
@@ -348,25 +570,49 @@ export default function HistoryPage() {
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+                onClick={handleToggleSelectionMode}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/75 transition hover:bg-white/[0.08]"
               >
-                批量选择
+                {selectionMode ? <CheckSquare className="h-4 w-4" /> : <Square className="h-4 w-4" />}
+                {selectionMode ? '退出批量选择' : '批量选择'}
               </button>
+              {selectionMode ? (
+                <button
+                  type="button"
+                  onClick={handleSelectAllFiltered}
+                  className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/75 transition hover:bg-white/[0.08]"
+                >
+                  <CheckSquare className="h-4 w-4" />
+                  {filtered.length > 0 && filtered.every((item) => selectedIds.includes(item.id)) ? '取消全选' : `全选当前筛选 (${filtered.length})`}
+                </button>
+              ) : null}
+              {selectionMode && selectedIds.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteSelected()}
+                  disabled={busy}
+                  className="inline-flex items-center gap-2 rounded-full border border-red-400/20 bg-red-500/10 px-4 py-2 text-sm text-red-200 transition hover:bg-red-500/16 disabled:opacity-60"
+                >
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  删除已选 {selectedIds.length} 项
+                </button>
+              ) : null}
               <button
                 type="button"
-                disabled
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+                onClick={() => void handleClearMedia()}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/75 transition hover:bg-white/[0.08] disabled:opacity-60"
               >
-                <Trash2 className="h-4 w-4" />
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 清空媒体
               </button>
               <button
                 type="button"
-                disabled
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.02] px-4 py-2 text-sm text-white/28"
+                onClick={() => void handleClearCharacterCards()}
+                disabled={busy}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/75 transition hover:bg-white/[0.08] disabled:opacity-60"
               >
-                <Trash2 className="h-4 w-4" />
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 清空角色卡
               </button>
             </div>
@@ -379,6 +625,7 @@ export default function HistoryPage() {
               <h2 className="text-2xl font-semibold tracking-[-0.04em] text-white">作品库</h2>
               <p className="mt-1 text-sm text-white/42">
                 当前筛选下共 {filtered.length.toLocaleString('zh-CN')} 个作品
+                {selectionMode ? ` · 已选 ${selectedIds.length} 项` : ''}
               </p>
             </div>
             <p className="text-xs text-white/32">最近状态每 15 秒自动同步一次</p>
@@ -401,12 +648,51 @@ export default function HistoryPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {filtered.map((item) => {
-                const card = (
-                  <div className="group overflow-hidden rounded-[24px] border border-white/10 bg-[linear-gradient(180deg,rgba(17,23,33,0.96),rgba(12,17,24,0.92))] p-3 transition hover:-translate-y-0.5 hover:border-white/16 hover:bg-white/[0.04]">
+                const selected = selectedIds.includes(item.id);
+                return (
+                  <div
+                    key={item.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      if (selectionMode) {
+                        toggleSelected(item.id);
+                        return;
+                      }
+                      if (item.resultUrl && item.status === 'completed') {
+                        setPreviewItem(item);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return;
+                      event.preventDefault();
+                      if (selectionMode) {
+                        toggleSelected(item.id);
+                        return;
+                      }
+                      if (item.resultUrl && item.status === 'completed') {
+                        setPreviewItem(item);
+                      }
+                    }}
+                    className={cn(
+                      'group overflow-hidden rounded-[24px] border bg-[linear-gradient(180deg,rgba(17,23,33,0.96),rgba(12,17,24,0.92))] p-3 transition',
+                      selectionMode
+                        ? selected
+                          ? 'border-emerald-400/45 bg-emerald-400/[0.08]'
+                          : 'border-white/10 hover:border-white/16 hover:bg-white/[0.04]'
+                        : 'border-white/10 hover:-translate-y-0.5 hover:border-white/16 hover:bg-white/[0.04]'
+                    )}
+                  >
                     <div className="relative aspect-video overflow-hidden rounded-[20px] border border-white/8 bg-black/20">
                       {renderPreview(item)}
 
-                      <div className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] text-white/88 backdrop-blur-md">
+                      {selectionMode ? (
+                        <div className="absolute left-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/35 backdrop-blur-md">
+                          {selected ? <CheckSquare className="h-4 w-4 text-emerald-300" /> : <Square className="h-4 w-4 text-white/78" />}
+                        </div>
+                      ) : null}
+
+                      <div className="absolute left-2 bottom-2 inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] text-white/88 backdrop-blur-md">
                         {isVideoItem(item) ? (
                           <Play className="h-3 w-3" />
                         ) : isImageItem(item) ? (
@@ -448,38 +734,132 @@ export default function HistoryPage() {
                         ) : null}
                       </div>
 
-                      {item.resultUrl && item.status === 'completed' ? (
-                        <div className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/38 transition group-hover:text-white/78">
-                          <ExternalLink className="h-4 w-4" />
+                      {item.resultUrl && item.status === 'completed' && !selectionMode ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => void handleDownload(item)}
+                            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/45 transition hover:text-white"
+                            title="下载"
+                          >
+                            <Download className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewItem(item)}
+                            className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/45 transition hover:text-white"
+                            title="预览"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                          </button>
                         </div>
                       ) : null}
                     </div>
                   </div>
                 );
-
-                if (item.resultUrl && item.status === 'completed') {
-                  return (
-                    <a key={item.id} href={item.resultUrl} target="_blank" rel="noreferrer">
-                      {card}
-                    </a>
-                  );
-                }
-
-                return <div key={item.id}>{card}</div>;
               })}
             </div>
           )}
-
-          <div className="mt-5">
-            <button
-              type="button"
-              className="rounded-full border border-white/10 bg-white/[0.03] px-5 py-2 text-sm text-white/72 transition hover:bg-white/[0.06] hover:text-white"
-            >
-              加载更多
-            </button>
-          </div>
         </div>
       </section>
+
+      {previewItem ? (
+        <div className="fixed inset-0 z-50 bg-black/78 p-3 backdrop-blur-xl md:p-6" onClick={() => setPreviewItem(null)}>
+          <div
+            className="mx-auto flex h-full max-h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#0f131a] shadow-2xl md:max-h-[calc(100vh-3rem)] md:flex-row"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div className="flex items-start justify-between gap-3 border-b border-white/8 px-4 py-3 md:px-5">
+                <div className="min-w-0">
+                  <h2 className="truncate text-sm font-medium text-white md:text-base">
+                    {previewItem.prompt || '无提示词'}
+                  </h2>
+                  <p className="mt-1 text-xs text-white/40">
+                    {new Date(previewItem.createdAt).toLocaleString('zh-CN')} · {getModelLabel(previewItem)}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setPreviewItem(null)}
+                  className="shrink-0 rounded-xl border border-white/10 bg-white/[0.03] p-2 text-white/60 transition-colors hover:bg-white/[0.07] hover:text-white"
+                  title="关闭"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="flex flex-1 min-h-0 items-center justify-center bg-black/20 p-3 md:p-6">
+                {isVideoItem(previewItem) ? (
+                  <video
+                    src={previewItem.resultUrl}
+                    className="max-h-full max-w-full rounded-xl border border-white/10 object-contain"
+                    controls
+                    autoPlay
+                    loop
+                  />
+                ) : isAudioItem(previewItem) ? (
+                  <div className="flex h-full w-full items-center justify-center rounded-xl border border-white/10 bg-gradient-to-br from-violet-500/12 to-fuchsia-500/10 p-6">
+                    <div className="w-full max-w-xl">
+                      <div className="mb-4 flex items-center justify-center">
+                        <Headphones className="h-10 w-10 text-white/60" />
+                      </div>
+                      <audio src={previewItem.resultUrl} className="w-full" controls autoPlay />
+                    </div>
+                  </div>
+                ) : (
+                  <img
+                    src={previewItem.resultUrl}
+                    alt={previewItem.prompt}
+                    className="max-h-full max-w-full rounded-xl border border-white/10 object-contain"
+                    decoding="async"
+                  />
+                )}
+              </div>
+            </div>
+
+            <aside className="flex w-full shrink-0 flex-col border-t border-white/8 md:max-w-[360px] md:border-l md:border-t-0">
+              <div className="flex-1 min-h-0 space-y-4 overflow-y-auto p-4 md:p-5">
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => void handleDownload(previewItem)}
+                    className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-black transition hover:opacity-90"
+                  >
+                    <Download className="w-4 h-4" />
+                    下载
+                  </button>
+                  <a
+                    href={previewItem.resultUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-white transition hover:bg-white/[0.08]"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    打开原始资源
+                  </a>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-white/40">提示词 / 名称</p>
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                    <p className="text-sm leading-relaxed text-white/82 whitespace-pre-wrap break-words">
+                      {previewItem.prompt || '无提示词'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-white/40">资源地址</p>
+                  <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                    <p className="break-all text-xs leading-5 text-white/68">
+                      {previewItem.resultUrl || '-'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
