@@ -171,6 +171,12 @@ function isSoraCompatibleChannel(channel: VideoChannel): boolean {
   return (channel.type === 'sora' || channel.type === 'apexerapi') && Boolean(channel.apiKey);
 }
 
+function normalizeSoraBaseUrl(baseUrl: string): string {
+  const trimmed = (baseUrl || '').trim().replace(/\/$/, '');
+  if (!trimmed) return trimmed;
+  return trimmed.endsWith('/api') ? trimmed.slice(0, -4) : trimmed;
+}
+
 function pickRoundRobinChannel(channels: VideoChannel[]): VideoChannel {
   const index = soraChannelCursor % channels.length;
   soraChannelCursor = (soraChannelCursor + 1) % channels.length;
@@ -187,7 +193,7 @@ async function getSoraConfig(options?: {
     if (channel && isSoraCompatibleChannel(channel)) {
       return {
         apiKey: channel.apiKey,
-        baseUrl: channel.baseUrl || DEFAULT_SORA_BASE_URL,
+        baseUrl: normalizeSoraBaseUrl(channel.baseUrl || DEFAULT_SORA_BASE_URL),
         channelId: channel.id,
         channelType: channel.type,
       };
@@ -203,7 +209,7 @@ async function getSoraConfig(options?: {
         : soraChannels[0];
     return {
       apiKey: selected.apiKey,
-      baseUrl: selected.baseUrl || DEFAULT_SORA_BASE_URL,
+      baseUrl: normalizeSoraBaseUrl(selected.baseUrl || DEFAULT_SORA_BASE_URL),
       channelId: selected.id,
       channelType: selected.type,
     };
@@ -212,7 +218,7 @@ async function getSoraConfig(options?: {
   const config = await getSystemConfig();
   return {
     apiKey: config.soraApiKey || '',
-    baseUrl: config.soraBaseUrl || DEFAULT_SORA_BASE_URL,
+    baseUrl: normalizeSoraBaseUrl(config.soraBaseUrl || DEFAULT_SORA_BASE_URL),
     channelType: 'legacy',
   };
 }
@@ -1211,11 +1217,11 @@ export async function createCharacterCard(request: CharacterCardRequest): Promis
   const { apiKey, baseUrl } = await getSoraConfig();
 
   if (!apiKey) {
-    throw new Error('Sora API Key 未配置，请在管理后台「视频渠道」中配置 Sora 渠道');
+    throw new Error('角色卡 API Key 未配置，请在管理后台「网站配置」→「角色卡接口」中填写');
   }
 
   if (!baseUrl) {
-    throw new Error('Sora Base URL 未配置');
+    throw new Error('角色卡 Base URL 未配置，请在管理后台「网站配置」→「角色卡接口」中填写');
   }
 
   // 检查是视频模式还是图生角色卡模式
@@ -1476,11 +1482,11 @@ export async function searchCharacters(request: CharacterSearchRequest): Promise
   const { apiKey, baseUrl } = await getSoraConfig();
 
   if (!apiKey) {
-    throw new Error('Sora API Key 未配置');
+    throw new Error('角色卡 API Key 未配置');
   }
 
   if (!baseUrl) {
-    throw new Error('Sora Base URL 未配置');
+    throw new Error('角色卡 Base URL 未配置');
   }
 
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');

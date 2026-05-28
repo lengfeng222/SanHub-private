@@ -134,6 +134,8 @@ export default function SiteConfigPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          soraApiKey: config.soraApiKey,
+          soraBaseUrl: config.soraBaseUrl,
           siteConfig: config.siteConfig,
           videoProxyEnabled: config.videoProxyEnabled,
           videoProxyBaseUrl: config.videoProxyBaseUrl,
@@ -294,6 +296,46 @@ export default function SiteConfigPage() {
           placeholder="技术支持信息"
           className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
         />
+      </Card>
+
+      <Card icon={Shield} title="角色卡接口">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <p className="text-sm text-foreground/60">Base URL</p>
+            <input
+              value={config.soraBaseUrl}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  soraBaseUrl: event.target.value,
+                }))
+              }
+              placeholder="https://your-sora-compatible-host"
+              className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+            />
+            <p className="text-xs text-foreground/35">
+              用于角色卡生成与搜索。支持填写主域名；如果误填了 /api 结尾，系统会自动兼容。
+            </p>
+          </div>
+          <div className="space-y-2">
+            <p className="text-sm text-foreground/60">API Key</p>
+            <input
+              type="password"
+              value={config.soraApiKey}
+              onChange={(event) =>
+                patch((prev) => ({
+                  ...prev,
+                  soraApiKey: event.target.value,
+                }))
+              }
+              placeholder="sk-..."
+              className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+            />
+            <p className="text-xs text-foreground/35">
+              当前只影响角色卡，不影响你现有的视频模型渠道。
+            </p>
+          </div>
+        </div>
       </Card>
 
       <Card icon={LayoutGrid} title="功能与邀请码">

@@ -414,6 +414,9 @@ export default function CharacterCardPage() {
           <p className="text-foreground/50 mt-1 font-light">
             上传视频或图片生成专属角色卡，角色卡将绑定到您的账户
           </p>
+          <p className="text-xs text-foreground/35 mt-2">
+            如提交后提示接口未配置，请到后台「网站配置」里填写角色卡专用 Base URL 与 Key。
+          </p>
         </div>
         {dailyLimits.characterCardLimit > 0 && (
           <div className={cn(
