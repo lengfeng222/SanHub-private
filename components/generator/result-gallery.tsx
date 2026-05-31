@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
+  Clock3,
   Download,
   Maximize2,
   X,
@@ -21,6 +22,7 @@ import { formatDate } from '@/lib/utils';
 import { downloadAsset } from '@/lib/download';
 import { toast } from '@/components/ui/toaster';
 import { resolveVideoModelLabel } from '@/lib/video-model-label';
+import { inferDisplayMediaKind } from '@/lib/media-kind';
 
 // 任务类型
 export interface Task {
@@ -70,7 +72,7 @@ export function ResultGallery({
   const [selectedFailedTask, setSelectedFailedTask] = useState<Task | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
-  const downloadFile = async (url: string, id: string, type: string) => {
+  const downloadFile = async (url: string, id: string, extension: string) => {
     if (!url) {
       toast({
         title: '下载失败',
@@ -80,12 +82,6 @@ export function ResultGallery({
       return;
     }
 
-    const extension =
-      type === 'music' || type === 'voice'
-        ? 'mp3'
-        : type.includes('video')
-          ? 'mp4'
-          : 'png';
     try {
       await downloadAsset(url, `sanhub-${id}.${extension}`);
     } catch (err) {
@@ -98,8 +94,16 @@ export function ResultGallery({
     }
   };
 
-  const isVideo = (gen: Generation) => gen.type.includes('video');
-  const isAudio = (gen: Generation) => gen.type === 'music' || gen.type === 'voice';
+  const getGenerationMediaKind = (gen: Generation) => inferDisplayMediaKind(gen);
+  const isVideo = (gen: Generation) => getGenerationMediaKind(gen) === 'video';
+  const isAudio = (gen: Generation) => getGenerationMediaKind(gen) === 'audio';
+  const getGenerationExtension = (gen: Generation) => {
+    const kind = getGenerationMediaKind(gen);
+    if (kind === 'audio') return 'mp3';
+    if (kind === 'video') return 'mp4';
+    return 'png';
+  };
+  const isExpiredGeneration = (gen: Generation) => gen.params?.runtimeMediaExpired === true;
   const canReuse = (gen: Generation) => !isVideo(gen) && typeof onReuseGeneration === 'function';
   const isTaskVideo = (task: Task) => task.type?.includes('video') || task.model?.includes('video');
   const isTaskAudio = (task: Task) => task.type === 'music' || task.type === 'voice';
@@ -221,6 +225,9 @@ export function ResultGallery({
                 清理错误
               </button>
             )}
+          </div>
+          <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100/85">
+            生成结果会优先缓存到本站服务器，默认保留 24 小时，过期后自动删除；如需长期保存，请及时下载。
           </div>
         </div>
 
@@ -357,12 +364,22 @@ export function ResultGallery({
                 >
                   {!gen.resultUrl ? (
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-sky-500/10 to-emerald-500/10 text-foreground/65">
-                      <Loader2 className="mb-3 h-8 w-8 animate-spin" />
+                      {isExpiredGeneration(gen) ? (
+                        <Clock3 className="mb-3 h-8 w-8" />
+                      ) : (
+                        <Loader2 className="mb-3 h-8 w-8 animate-spin" />
+                      )}
                       <p className="text-xs font-medium">
-                        {gen.status === 'completed' ? '媒体同步中' : '处理中'}
+                        {isExpiredGeneration(gen)
+                          ? '作品已过期'
+                          : gen.status === 'completed'
+                            ? '媒体同步中'
+                            : '处理中'}
                       </p>
                       <p className="mt-1 max-w-[84%] truncate text-[10px] text-foreground/40">
-                        {getGenerationModelLabel(gen) || '生成结果正在同步'}
+                        {isExpiredGeneration(gen)
+                          ? '该文件已超过 24 小时缓存期，已从本站服务器删除'
+                          : getGenerationModelLabel(gen) || '生成结果正在同步'}
                       </p>
                     </div>
                   ) : isVideo(gen) ? (
@@ -423,7 +440,7 @@ export function ResultGallery({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          downloadFile(gen.resultUrl, gen.id, gen.type);
+                          downloadFile(gen.resultUrl, gen.id, getGenerationExtension(gen));
                         }}
                         className="w-8 h-8 bg-card/70 border border-border/70 backdrop-blur-sm rounded-lg flex items-center justify-center text-foreground hover:bg-card/90 transition-colors"
                         title="Download"
@@ -550,7 +567,7 @@ export function ResultGallery({
                     </>
                   )}
                   <button
-                    onClick={() => downloadFile(selected.resultUrl, selected.id, selected.type)}
+                    onClick={() => downloadFile(selected.resultUrl, selected.id, getGenerationExtension(selected))}
                     className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-foreground px-4 py-2.5 text-sm font-medium text-background transition-colors hover:opacity-90"
                   >
                     <Download className="w-4 h-4" />

@@ -133,6 +133,10 @@ export interface GenerationParams {
   upstreamResultUrl?: string;
   upstreamFinal?: boolean;
   upstreamUpdatedAt?: number;
+  runtimeMediaOriginTimestamp?: number;
+  runtimeMediaCachedAt?: number;
+  runtimeMediaCachedFrom?: string;
+  runtimeMediaExpired?: boolean;
 }
 
 // SORA 后台配置
@@ -458,7 +462,6 @@ export interface SiteConfig {
 export interface FeatureFlagsConfig {
   squareEnabled: boolean;
   gachaEnabled: boolean;
-  characterCardEnabled: boolean;
 }
 
 export interface InviteSettingsConfig {
@@ -618,7 +621,7 @@ export interface SoraGenerateRequest {
   duration?: string;
   videoConfigObject?: VideoConfigObject;
   video_config?: VideoConfigObject;
-  files?: { mimeType: string; data: string }[];
+  files?: { mimeType: string; data: string; slot?: string; durationSeconds?: number }[];
   referenceImageUrl?: string;
   publicBaseUrl?: string;
   style_id?: string; // 风格: festive, retro, news, selfie, handheld, anime, comic, golden, vintage

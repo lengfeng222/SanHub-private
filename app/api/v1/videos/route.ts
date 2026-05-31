@@ -166,7 +166,10 @@ export async function POST(request: NextRequest) {
     const origin = new URL(request.url).origin;
     const firstUrl = result.data?.[0]?.url;
     if (firstUrl) {
-      result.data[0].url = await saveMediaAsync(`v1-video-${result.id}`, firstUrl, { publicBaseUrl: origin });
+      result.data[0].url = await saveMediaAsync(`v1-video-${result.id}`, firstUrl, {
+        publicBaseUrl: origin,
+        storageMode: 'runtime',
+      });
     }
     const response = buildSyncResponse(processedRequest, result);
     return NextResponse.json(response);

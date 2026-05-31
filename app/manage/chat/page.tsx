@@ -1,2 +1,5 @@
-import ModelsPage from '@/app/admin/models/page';
-export default ModelsPage;
+import { redirect } from 'next/navigation';
+
+export default function ManageChatRedirectPage() {
+  redirect('/manage/video');
+}

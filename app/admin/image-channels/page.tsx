@@ -139,7 +139,14 @@ type GroupedRemoteModel = {
   aspectRatios: string[];
   imageSizes: string[];
   resolutions: Record<string, string | Record<string, string>>;
-  features: { textToImage: boolean; imageToImage: boolean; imageSize: boolean };
+  features: ImageModelFeatures;
+  imageUrl?: string;
+  requiresReferenceImage?: boolean;
+  allowEmptyPrompt?: boolean;
+  billingMode?: 'per_call' | 'per_second';
+  billingPrice?: number;
+  billingUnit?: number;
+  costPerGeneration?: number;
 };
 
 type ModelPresetId = 'general' | 'edit' | 'hd' | 'matting' | 'upscale';
@@ -1164,22 +1171,25 @@ export default function ImageChannelsPage() {
             features: {
               textToImage: group.features.textToImage,
               imageToImage: group.features.imageToImage,
-              upscale: false,
-              matting: false,
-              multipleImages: false,
+              upscale: group.features.upscale || false,
+              matting: group.features.matting || false,
+              multipleImages: group.features.multipleImages || false,
               imageSize: group.features.imageSize,
+              qualityOptions: group.features.qualityOptions || [],
             },
             aspectRatios: group.aspectRatios,
             imageSizes: group.features.imageSize ? group.imageSizes : undefined,
             resolutions: group.resolutions,
             defaultAspectRatio: group.aspectRatios.includes('1:1') ? '1:1' : group.aspectRatios[0],
             defaultImageSize: group.features.imageSize ? (group.imageSizes.includes('1K') ? '1K' : group.imageSizes[0]) : undefined,
+            requiresReferenceImage: group.requiresReferenceImage || false,
+            allowEmptyPrompt: group.allowEmptyPrompt || false,
             enabled: true,
-            costPerGeneration: 10,
-            billingMode: 'per_call',
-            billingPrice: 10,
-            billingUnit: 1,
-            imageUrl: '/huantu-logo.jpg',
+            costPerGeneration: group.costPerGeneration ?? 20,
+            billingMode: group.billingMode || 'per_call',
+            billingPrice: group.billingPrice ?? group.costPerGeneration ?? 20,
+            billingUnit: group.billingUnit ?? 1,
+            imageUrl: group.imageUrl || '/huantu-logo.jpg',
             sortOrder: nextSortOrder,
           }),
         });
@@ -2100,7 +2110,7 @@ export default function ImageChannelsPage() {
                       >
                         <Plus className="w-4 h-4" />
                       </button>
-                      {(channel.type === 'apexerapi' || channel.type === 'openai-chat' || channel.type === 'openai-compatible') && (
+                      {(channel.type === 'apexerapi' || channel.type === 'openai-chat' || channel.type === 'openai-compatible' || channel.type === 'lingke-media') && (
                         <button
                           onClick={() => fetchRemoteModels(channel.id)}
                           disabled={fetchingRemoteModels}

@@ -5,9 +5,11 @@
 
 import { fetch as undiciFetch, Agent } from 'undici';
 import { getImageModelWithChannel } from './db';
+import { resolveImageModelWithChannelSelection } from './model-channel-resolver';
 import { uploadToPicUI } from './picui';
 import { fetchWithRetry } from './http-retry';
 import { isTransientError } from './polling-utils';
+import { saveMediaToPublicFile } from './media-storage';
 import type { GenerateResult } from '@/types';
 
 export interface ImageGenerateRequest {
@@ -19,6 +21,7 @@ export interface ImageGenerateRequest {
   quality?: string;
   images?: Array<{ mimeType: string; data: string }>;
   idempotencyKey?: string;
+  publicBaseUrl?: string;
 }
 
 export type ImageGenerationProgressCallback = (
@@ -89,9 +92,12 @@ export type ResolvedImageTarget = {
 
 const PIXEL_SIZE_PATTERN = /^\d+[x×]\d+$/i;
 const ASPECT_RATIO_PATTERN = /^\d+:\d+$/;
+const SYMBOLIC_IMAGE_SIZE_PATTERN = /^(?:\d+K|SD|HD|\d{3,4}P)$/i;
 
 const isSizeValue = (value: string): boolean =>
-  PIXEL_SIZE_PATTERN.test(value) || ASPECT_RATIO_PATTERN.test(value);
+  PIXEL_SIZE_PATTERN.test(value)
+  || ASPECT_RATIO_PATTERN.test(value)
+  || SYMBOLIC_IMAGE_SIZE_PATTERN.test(value.trim());
 
 const GENERATION_POST_RETRY_OPTIONS = { attempts: 1 };
 const IMAGE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
@@ -261,9 +267,14 @@ function normalizeLingkeStatus(status: string): 'pending' | 'processing' | 'comp
   if (
     normalized.includes('fail') ||
     normalized.includes('error') ||
+    normalized.includes('not exist') ||
+    normalized.includes('not found') ||
+    normalized.includes('does not exist') ||
     normalized.includes('cancel') ||
     normalized.includes('失败') ||
     normalized.includes('错误') ||
+    normalized.includes('不存在') ||
+    normalized.includes('未找到') ||
     normalized.includes('取消') ||
     normalized.includes('异常')
   ) {
@@ -1261,6 +1272,206 @@ async function pollLingkeMediaImageTask(
   throw new Error('灵刻媒体图片任务超时');
 }
 
+function normalizeLingkeImageReferenceValue(image: { mimeType: string; data: string }): string | null {
+  const value = String(image.data || '').trim();
+  if (!value) return null;
+
+  if (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('data:')) {
+    return value;
+  }
+
+  return `data:${image.mimeType || 'image/jpeg'};base64,${value.replace(/^data:[^;]+;base64,/, '')}`;
+}
+
+async function prepareLingkeMediaReferenceImages(
+  images: Array<{ mimeType: string; data: string }>,
+  publicBaseUrl?: string,
+): Promise<Array<{ mimeType: string; data: string }>> {
+  if (!Array.isArray(images) || images.length === 0) return [];
+
+  return Promise.all(
+    images.map(async (image, index) => {
+      const normalized = normalizeLingkeImageReferenceValue(image);
+      if (!normalized) {
+        return image;
+      }
+
+      if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+        return {
+          ...image,
+          data: normalized,
+        };
+      }
+
+      const filename = `lingke-image-input-${Date.now()}-${index}`;
+      const publicUrl = await saveMediaToPublicFile(filename, normalized, {
+        publicBaseUrl,
+        filename,
+      });
+
+      if (!publicUrl) {
+        throw new Error(
+          '当前灵刻图片模型上传参考图时，需要站点具备公网可访问地址；请在服务器公网域名下重试。'
+        );
+      }
+
+      return {
+        ...image,
+        data: publicUrl,
+      };
+    })
+  );
+}
+
+function normalizeLingkeAspectRatio(value?: string, fallback = '1:1'): string {
+  const raw = String(value || '').trim();
+  if (['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', 'auto'].includes(raw)) {
+    return raw;
+  }
+  return fallback;
+}
+
+function resolveOpenAiStyleImageSize(aspectRatio?: string): string {
+  switch (normalizeLingkeAspectRatio(aspectRatio, '1:1')) {
+    case '16:9':
+      return '1536x1024';
+    case '9:16':
+      return '1024x1536';
+    case '3:2':
+      return '1536x1024';
+    case '2:3':
+      return '1024x1536';
+    case '4:3':
+      return '1280x960';
+    case '3:4':
+      return '960x1280';
+    case '1:1':
+    default:
+      return '1024x1024';
+  }
+}
+
+function resolveGrokImageSize(aspectRatio?: string): string {
+  switch (normalizeLingkeAspectRatio(aspectRatio, '1:1')) {
+    case '16:9':
+      return '1280x720';
+    case '9:16':
+      return '720x1280';
+    case '3:2':
+      return '1200x800';
+    case '2:3':
+      return '800x1200';
+    case '4:3':
+      return '1200x900';
+    case '3:4':
+      return '900x1200';
+    case '1:1':
+    default:
+      return '1024x1024';
+  }
+}
+
+function resolveLingkeImageSizeBucket(
+  value: string | undefined,
+  supported: string[],
+  fallback: string
+): string {
+  const raw = String(value || '').trim().toUpperCase();
+  if (raw && supported.includes(raw)) return raw;
+  return fallback;
+}
+
+function buildLingkeMediaImageParams(
+  request: ImageGenerateRequest,
+  apiModel: string
+): Record<string, unknown> {
+  const model = String(apiModel || '').trim().toLowerCase();
+  const aspectRatio = normalizeLingkeAspectRatio(request.aspectRatio, '1:1');
+  const imageSize = String(request.imageSize || request.size || '').trim();
+  const quality = String(request.quality || '').trim().toLowerCase() || 'medium';
+  const referenceImages =
+    request.images
+      ?.map((image) => normalizeLingkeImageReferenceValue(image))
+      .filter((value): value is string => Boolean(value)) || [];
+
+  const params: Record<string, unknown> = {};
+  if (referenceImages.length > 0) {
+    params.images = referenceImages;
+  }
+
+  if (model === 'gpt-image-2' || model === 'gpt-image-2-guan') {
+    params.size = resolveOpenAiStyleImageSize(aspectRatio);
+    params.quality = ['low', 'medium', 'high', 'auto'].includes(quality) ? quality : 'medium';
+    return params;
+  }
+
+  if (model === 'gemini-3-pro-image-preview' || model === 'gemini-3.1-flash-image-preview') {
+    params.aspectRatio = aspectRatio;
+    params.imageSize = resolveLingkeImageSizeBucket(imageSize, ['0.5K', '1K', '2K', '4K'], '1K');
+    return params;
+  }
+
+  if (model === 'vidu-image-2') {
+    params.aspect_ratio = aspectRatio;
+    params.resolution = resolveLingkeImageSizeBucket(imageSize, ['1K', '2K', '3K'], '1K');
+    params.quality = ['low', 'medium', 'high'].includes(quality) ? quality : 'medium';
+    params.style = 'general';
+    return params;
+  }
+
+  if (model === 'wan2.7-image') {
+    params.size = aspectRatio;
+    params.quality = ['pro', 'standard'].includes(quality) ? quality : 'standard';
+    return params;
+  }
+
+  if (model === 'wan2.6-image' || model === 'qwen-image') {
+    params.size = aspectRatio;
+    params.prompt_extend = 'false';
+    return params;
+  }
+
+  if (model === 'grok-4.1-image' || model === 'grok-4.2-image') {
+    params.size = resolveGrokImageSize(aspectRatio);
+    return params;
+  }
+
+  if (model === 'kling-v3' || model === 'kling-v3-omni' || model === 'kling-image-o1') {
+    params.aspect_ratio = aspectRatio;
+    params.resolution = resolveLingkeImageSizeBucket(imageSize, ['1K', '2K', '4K'], model === 'kling-v3' ? '1K' : '2K');
+    return params;
+  }
+
+  if (model === 'mj_imagine') {
+    params.botType = 'MID_JOURNEY';
+    params.aspectRatio = aspectRatio;
+    params.quality = '1';
+    params.style = '';
+    params.chaos = '0';
+    params.stylize = '100';
+    return params;
+  }
+
+  if (model.startsWith('doubao-seedream-')) {
+    params.aspect_ratio = aspectRatio === '1:1' ? 'auto' : aspectRatio;
+    const supportedSizes = model.includes('5-0') ? ['2K', '3K'] : ['2K', '4K'];
+    params.size = resolveLingkeImageSizeBucket(imageSize, supportedSizes, supportedSizes[0]);
+    if (model.includes('5-0')) {
+      params.web_search = 'false';
+    }
+    return params;
+  }
+
+  params.aspect_ratio = aspectRatio;
+  if (request.size) params.size = request.size;
+  if (request.imageSize) params.image_size = request.imageSize;
+  if (!params.quality && quality) {
+    params.quality = quality;
+  }
+
+  return params;
+}
+
 async function generateWithLingkeMedia(
   request: ImageGenerateRequest,
   baseUrl: string,
@@ -1271,22 +1482,17 @@ async function generateWithLingkeMedia(
 ): Promise<GenerateResult> {
   const key = getNextApiKey(apiKey, channelId);
   const apiUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/generate`;
-
-  const params: Record<string, unknown> = {
-    quality: (request.quality || 'hd').trim() || 'hd',
-    aspect_ratio: request.aspectRatio || '1:1',
-  };
-
-  if (request.size) params.size = request.size;
-  if (request.imageSize) params.image_size = request.imageSize;
-
-  if (request.images && request.images.length > 0) {
-    params.images = request.images.map((image) =>
-      image.data.startsWith('data:')
-        ? image.data
-        : `data:${image.mimeType || 'image/jpeg'};base64,${image.data.replace(/^data:[^;]+;base64,/, '')}`
-    );
-  }
+  const preparedImages = await prepareLingkeMediaReferenceImages(
+    request.images || [],
+    request.publicBaseUrl,
+  );
+  const params = buildLingkeMediaImageParams(
+    {
+      ...request,
+      images: preparedImages,
+    },
+    apiModel
+  );
 
   const response = await fetchWithRetry(undiciFetch, apiUrl, () => ({
     method: 'POST',
@@ -1371,7 +1577,11 @@ export async function generateImage(
   request: ImageGenerateRequest,
   onProgress?: ImageGenerationProgressCallback
 ): Promise<GenerateResult> {
-  const modelConfig = await getImageModelWithChannel(request.modelId);
+  const modelConfig =
+    await getImageModelWithChannel(request.modelId)
+    || await resolveImageModelWithChannelSelection({
+      modelId: request.modelId,
+    });
   if (!modelConfig) {
     throw new Error('模型不存在或未配置');
   }

@@ -8,7 +8,26 @@ export function cn(...inputs: ClassValue[]) {
 
 // 生成 UUID
 export function generateId(): string {
-  return crypto.randomUUID();
+  const runtimeCrypto = globalThis.crypto as
+    | { randomUUID?: () => string }
+    | undefined;
+
+  if (runtimeCrypto && typeof runtimeCrypto.randomUUID === 'function') {
+    return runtimeCrypto.randomUUID();
+  }
+
+  try {
+    const nodeCrypto = (eval('require') as NodeRequire)('crypto') as {
+      randomUUID?: () => string;
+    };
+    if (typeof nodeCrypto.randomUUID === 'function') {
+      return nodeCrypto.randomUUID();
+    }
+  } catch {
+    // ignore
+  }
+
+  return `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // 格式化日期

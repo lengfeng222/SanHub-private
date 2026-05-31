@@ -7,6 +7,7 @@ import {
   refreshLingkeImageGenerationIfNeeded,
   refreshLingkeVideoGenerationIfNeeded,
 } from '@/lib/lingke-generation-sync';
+import { getBaseUrlFromRequest } from '@/lib/epay';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,7 +51,7 @@ export async function GET(
       return NextResponse.json({ error: '无权访问此任务' }, { status: 403 });
     }
 
-    const publicBaseUrl = new URL(request.url).origin;
+    const publicBaseUrl = getBaseUrlFromRequest(request);
     let generation = await refreshLingkeImageGenerationIfNeeded(initialGeneration, publicBaseUrl);
     generation = await refreshLingkeVideoGenerationIfNeeded(generation, publicBaseUrl);
 

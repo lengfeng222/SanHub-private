@@ -26,7 +26,10 @@ export async function GET(request: NextRequest, context: { params: { video_id: s
   try {
     const url = await getVideoContentUrl(videoId);
     const origin = new URL(request.url).origin;
-    const cachedUrl = await saveMediaAsync(`v1-video-${videoId}`, url, { publicBaseUrl: origin });
+    const cachedUrl = await saveMediaAsync(`v1-video-${videoId}`, url, {
+      publicBaseUrl: origin,
+      storageMode: 'runtime',
+    });
     return NextResponse.redirect(cachedUrl, 302);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to get video content';

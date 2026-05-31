@@ -1,7 +1,7 @@
 'use client';
 
-import ImagePage from '@/components/generator/image-generation-page';
+import { ImageToolPage } from '@/components/lc/tool-pages';
 
 export default function Page() {
-  return <ImagePage />;
+  return <ImageToolPage variant="gptimage" />;
 }

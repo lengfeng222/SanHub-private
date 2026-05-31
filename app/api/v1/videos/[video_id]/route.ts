@@ -28,7 +28,10 @@ export async function GET(request: NextRequest, context: { params: { video_id: s
     const origin = new URL(request.url).origin;
     const rawUrl = status.url || status.output?.url;
     if ((status.status === 'completed' || status.status === 'succeeded') && rawUrl) {
-      const cachedUrl = await saveMediaAsync(`v1-video-${videoId}`, rawUrl, { publicBaseUrl: origin });
+      const cachedUrl = await saveMediaAsync(`v1-video-${videoId}`, rawUrl, {
+        publicBaseUrl: origin,
+        storageMode: 'runtime',
+      });
       status.url = cachedUrl;
       if (status.output) status.output.url = cachedUrl;
     }

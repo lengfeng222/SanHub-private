@@ -66,6 +66,7 @@ export async function POST(request: NextRequest) {
       ...resolveImageSize(parsed.size),
       images: imageInputs.length > 0 ? imageInputs : undefined,
       idempotencyKey: requestIdempotencyKey(request, 'sanhub-v1-image'),
+      publicBaseUrl: origin,
     };
 
     // extra_body.google.image_config 的 aspectRatio/imageSize
@@ -80,7 +81,10 @@ export async function POST(request: NextRequest) {
     const result = await generateImage(imageRequest);
     const outputUrl = parsed.responseFormat === 'b64_json'
       ? result.url
-      : await saveMediaAsync(`v1-image-${crypto.randomUUID()}`, result.url, { publicBaseUrl: origin });
+      : await saveMediaAsync(`v1-image-${crypto.randomUUID()}`, result.url, {
+          publicBaseUrl: origin,
+          storageMode: 'runtime',
+        });
 
     return NextResponse.json({
       created: Math.floor(Date.now() / 1000),

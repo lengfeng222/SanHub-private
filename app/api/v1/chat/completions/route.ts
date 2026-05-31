@@ -575,7 +575,10 @@ export async function POST(request: NextRequest) {
           videoConfigObject: normalizedVideoConfigObject,
           video_config: normalizedVideoConfigObject,
         });
-        const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
+        const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, {
+          publicBaseUrl: origin,
+          storageMode: 'runtime',
+        });
         const content = buildChatResponseContent('video', outputUrl);
         return NextResponse.json({
           id: completionId,
@@ -637,7 +640,10 @@ export async function POST(request: NextRequest) {
             }
           );
 
-          const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
+          const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, {
+            publicBaseUrl: origin,
+            storageMode: 'runtime',
+          });
           const content = buildChatResponseContent('video', outputUrl);
           send(
             buildChatChunk({
@@ -696,6 +702,7 @@ export async function POST(request: NextRequest) {
     ...resolveImageSize(payload.size),
     images: imageInputs.length > 0 ? imageInputs : undefined,
     idempotencyKey: requestIdempotencyKey(request, completionId),
+    publicBaseUrl: origin,
   };
 
   if (!imageRequest.aspectRatio && aspectRatioFromConfig) {
@@ -708,7 +715,10 @@ export async function POST(request: NextRequest) {
   if (!stream) {
     try {
       const result = await generateImage(imageRequest);
-      const outputUrl = await saveMediaAsync(`v1-chat-image-${completionId}`, result.url, { publicBaseUrl: origin });
+      const outputUrl = await saveMediaAsync(`v1-chat-image-${completionId}`, result.url, {
+        publicBaseUrl: origin,
+        storageMode: 'runtime',
+      });
       const content = buildChatResponseContent('image', outputUrl);
       return NextResponse.json({
         id: completionId,
@@ -744,7 +754,10 @@ export async function POST(request: NextRequest) {
 
       try {
         const result = await generateImage(imageRequest);
-        const outputUrl = await saveMediaAsync(`v1-chat-image-${completionId}`, result.url, { publicBaseUrl: origin });
+        const outputUrl = await saveMediaAsync(`v1-chat-image-${completionId}`, result.url, {
+          publicBaseUrl: origin,
+          storageMode: 'runtime',
+        });
         const content = buildChatResponseContent('image', outputUrl);
         send(
           buildChatChunk({

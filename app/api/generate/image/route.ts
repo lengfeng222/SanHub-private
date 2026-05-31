@@ -13,18 +13,23 @@ import {
   refundGenerationBalance,
   getGenerationByClientRequestId,
 } from '@/lib/db';
+import { saveMediaToPublicFile } from '@/lib/media-storage';
 import { saveMediaAsync } from '@/lib/media-storage';
+import { extractRuntimeMediaFilenameFromUrl } from '@/lib/media-storage';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { fetchReferenceImage } from '@/lib/reference-image';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import type { ChannelType, Generation, GenerationType } from '@/types';
 import { resolveImageGenerationCost } from '@/lib/member-pricing';
+import { getBaseUrlFromRequest } from '@/lib/epay';
+import { resolveImageModelWithChannelSelection } from '@/lib/model-channel-resolver';
 
 export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
 const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
 const CLIENT_REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const INTERNAL_RUNTIME_MEDIA_PATH_PATTERN = /^\/api\/runtime-media\/[^/?#]+$/i;
 const imageTaskCreationPromises = new Map<string, Promise<Generation>>();
 const IMAGE_TYPE_BY_CHANNEL: Record<ChannelType, GenerationType> = {
   apexerapi: 'gemini-image',
@@ -133,7 +138,18 @@ async function processGenerationTask(
     });
 
     // 保存到图床或本地
-    const savedUrl = await saveMediaAsync(generationId, result.url, { publicBaseUrl });
+    const savedUrl = await saveMediaAsync(generationId, result.url, {
+      publicBaseUrl,
+      storageMode: 'runtime',
+    });
+    const runtimeMediaFilename = extractRuntimeMediaFilenameFromUrl(savedUrl, publicBaseUrl);
+    const runtimeMediaMeta = runtimeMediaFilename
+      ? {
+          runtimeMediaCachedAt: Date.now(),
+          runtimeMediaCachedFrom: result.url,
+          runtimeMediaOriginTimestamp: Date.now(),
+        }
+      : {};
 
     console.log(`[Task ${generationId}] 生成成功`);
 
@@ -144,6 +160,7 @@ async function processGenerationTask(
       params: buildPersistedParams(100, {
         upstreamFinal: true,
         upstreamResultUrl: result.url,
+        ...runtimeMediaMeta,
       }),
     });
 
@@ -245,9 +262,17 @@ export async function POST(request: NextRequest) {
     }
 
     // 获取模型配置
-    const modelConfig = await getImageModelWithChannel(modelId);
+    const modelConfig =
+      await getImageModelWithChannel(modelId)
+      || await resolveImageModelWithChannelSelection({
+        modelId,
+        model: typeof body?.model === 'string' ? body.model : undefined,
+      });
     if (!modelConfig) {
-      return NextResponse.json({ error: '模型不存在' }, { status: 404 });
+      return NextResponse.json(
+        { error: '当前选择的模型已下线或渠道已变更，请刷新页面后重新选择模型' },
+        { status: 400 }
+      );
     }
     const { model, channel } = modelConfig;
     if (!model.enabled) {
@@ -326,15 +351,130 @@ export async function POST(request: NextRequest) {
       }
 
       // 处理参考图
-      const origin = new URL(request.url).origin;
+      const origin = getBaseUrlFromRequest(request);
       const imageList: Array<{ mimeType: string; data: string }> = [];
+      const shouldKeepPublicImageUrls = channel.type === 'lingke-media';
 
-      if (images && Array.isArray(images)) {
-        imageList.push(...images);
-      }
+      const persistReferenceAsPublicUrl = async (
+        input: string,
+        options: { mimeType?: string; filenameSuffix?: string } = {}
+      ) => {
+        const trimmed = String(input || '').trim();
+        if (!trimmed) return '';
 
-      if (referenceImageUrl) {
-        const referenceImage = await fetchReferenceImage(referenceImageUrl, {
+        const filenameSuffix = options.filenameSuffix || `ref-${Date.now()}-${imageList.length}`;
+
+        if (trimmed.startsWith('data:')) {
+          const publicUrl = await saveMediaToPublicFile(
+            `${session.user.id}-${filenameSuffix}`,
+            trimmed,
+            {
+              publicBaseUrl: origin,
+              filename: `${session.user.id}-${filenameSuffix}`,
+            }
+          );
+
+          if (!publicUrl) {
+            throwRouteResponse(
+              NextResponse.json(
+                {
+                  error:
+                    '当前访问地址无法生成公网 URL，请使用服务器公网 IP/域名访问站点后再上传素材',
+                },
+                { status: 400 }
+              )
+            );
+          }
+
+          return publicUrl;
+        }
+
+        let parsedUrl: URL;
+        try {
+          parsedUrl = new URL(trimmed, origin);
+        } catch {
+          parsedUrl = new URL(origin);
+          parsedUrl.pathname = trimmed;
+        }
+
+        const isHttpUrl = parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+        if (!isHttpUrl) {
+          throwRouteResponse(
+            NextResponse.json({ error: '参考图地址格式无效' }, { status: 400 })
+          );
+        }
+
+        if (
+          parsedUrl.origin === origin &&
+          INTERNAL_RUNTIME_MEDIA_PATH_PATTERN.test(parsedUrl.pathname)
+        ) {
+          return parsedUrl.toString();
+        }
+
+        if (parsedUrl.origin !== origin) {
+          return parsedUrl.toString();
+        }
+
+        const referenceImage = await fetchReferenceImage(parsedUrl.toString(), {
+          origin,
+          userId: session.user.id,
+          userRole: session.user.role,
+          maxBytes: MAX_REFERENCE_IMAGE_BYTES,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+        });
+
+        const publicUrl = await saveMediaToPublicFile(
+          `${session.user.id}-${filenameSuffix}`,
+          referenceImage.dataUrl,
+          {
+            publicBaseUrl: origin,
+            filename: `${session.user.id}-${filenameSuffix}`,
+          }
+        );
+
+        if (!publicUrl) {
+          throwRouteResponse(
+            NextResponse.json(
+              {
+                error:
+                  '当前访问地址无法生成公网 URL，请使用服务器公网 IP/域名访问站点后再上传素材',
+              },
+              { status: 400 }
+            )
+          );
+        }
+
+        return publicUrl;
+      };
+
+      const pushReferenceImage = async (
+        input: string,
+        options: { mimeType?: string; filenameSuffix?: string } = {}
+      ) => {
+        const trimmed = String(input || '').trim();
+        if (!trimmed) return;
+
+        if (shouldKeepPublicImageUrls) {
+          const publicUrl = await persistReferenceAsPublicUrl(trimmed, options);
+          if (!publicUrl) return;
+          imageList.push({
+            mimeType: options.mimeType || 'application/octet-stream',
+            data: publicUrl,
+          });
+          return;
+        }
+
+        if (trimmed.startsWith('data:')) {
+          const match = trimmed.match(/^data:([^;]+);base64,(.+)$/);
+          if (match) {
+            imageList.push({ mimeType: match[1], data: trimmed });
+            return;
+          }
+        }
+
+        const referenceImage = await fetchReferenceImage(trimmed, {
           origin,
           userId: session.user.id,
           userRole: session.user.role,
@@ -347,30 +487,40 @@ export async function POST(request: NextRequest) {
           mimeType: referenceImage.mimeType,
           data: referenceImage.dataUrl,
         });
+      };
+
+      if (images && Array.isArray(images)) {
+        for (let index = 0; index < images.length; index += 1) {
+          const image = images[index];
+          const value = String(image?.data || '').trim();
+          if (!value) continue;
+
+          const normalizedInput =
+            !value.startsWith('data:') &&
+            !value.startsWith('http://') &&
+            !value.startsWith('https://') &&
+            image?.mimeType
+              ? `data:${image.mimeType};base64,${value.replace(/^data:[^;]+;base64,/, '')}`
+              : value;
+
+          await pushReferenceImage(normalizedInput, {
+            mimeType: image?.mimeType,
+            filenameSuffix: `legacy-${Date.now()}-${index}`,
+          });
+        }
+      }
+
+      if (referenceImageUrl) {
+        await pushReferenceImage(referenceImageUrl, {
+          filenameSuffix: `single-${Date.now()}`,
+        });
       }
 
       if (referenceImages && Array.isArray(referenceImages)) {
-        for (const img of referenceImages) {
-          if (img.startsWith('data:')) {
-            const match = img.match(/^data:([^;]+);base64,(.+)$/);
-            if (match) {
-              imageList.push({ mimeType: match[1], data: img });
-            }
-          } else {
-            const referenceImage = await fetchReferenceImage(img, {
-              origin,
-              userId: session.user.id,
-              userRole: session.user.role,
-              maxBytes: MAX_REFERENCE_IMAGE_BYTES,
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              },
-            });
-            imageList.push({
-              mimeType: referenceImage.mimeType,
-              data: referenceImage.dataUrl,
-            });
-          }
+        for (let index = 0; index < referenceImages.length; index += 1) {
+          await pushReferenceImage(referenceImages[index], {
+            filenameSuffix: `multi-${Date.now()}-${index}`,
+          });
         }
       }
 
@@ -390,12 +540,13 @@ export async function POST(request: NextRequest) {
 
       // 构建请求
       const generateRequest: ImageGenerateRequest = {
-        modelId,
+        modelId: model.id,
         prompt: prompt || '',
         aspectRatio,
         imageSize,
         quality: quality || undefined,
         images: imageList.length > 0 ? imageList : undefined,
+        publicBaseUrl: origin,
       };
 
       try {
@@ -417,7 +568,7 @@ export async function POST(request: NextRequest) {
       let generation: Generation;
       const generationParams: Generation['params'] = {
         model: model.apiModel,
-        modelId,
+        modelId: model.id,
         aspectRatio,
         imageSize,
         quality: quality || undefined,
@@ -447,7 +598,7 @@ export async function POST(request: NextRequest) {
 
       console.log('[API] 图像生成任务已创建:', {
         id: generation.id,
-        modelId,
+        modelId: model.id,
         model: model.apiModel,
         resolvedModel: resolvedTarget.model,
         resolvedSize: resolvedTarget.size,

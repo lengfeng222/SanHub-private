@@ -7,13 +7,10 @@ import {
   History, 
   Settings,
   Shield,
-  User,
   LayoutGrid,
   Sparkles,
   Image as ImageIcon,
   Video,
-  Music,
-  Mic,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SafeUser } from '@/types';
@@ -38,9 +35,6 @@ const navItems = [
   { href: '/supervideo', icon: Sparkles, label: '模型选择', description: '直接选择模型创作', badge: null, isAI: true },
   { href: '/image', icon: ImageIcon, label: '图像', description: '图像创作', badge: null, isAI: true },
   { href: '/video', icon: Video, label: '视频', description: '视频生成', badge: null, isAI: true },
-  { href: '/music', icon: Music, label: '音乐', description: '音乐生成', badge: null, isAI: true },
-  { href: '/voice', icon: Mic, label: '语音', description: '语音生成', badge: null, isAI: true },
-  { href: '/video/character-card', icon: User, label: '角色卡生成', description: '从视频提取角色', badge: 'NEW', isAI: true },
   { href: '/square', icon: LayoutGrid, label: '广场', description: '探索社区创作', badge: 'HOT', isAI: false },
   { href: '/history', icon: History, label: '历史', description: '作品记录', badge: null, isAI: false },
   { href: '/settings', icon: Settings, label: '设置', description: '账号管理', badge: null, isAI: false },
@@ -56,9 +50,7 @@ export function Sidebar({ user }: SidebarProps) {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [pendingUpdatedAt, setPendingUpdatedAt] = useState<number | null>(null);
   const visibleNavItems = navItems.filter(
-    (item) =>
-      (item.href !== '/square' || siteConfig.squareEnabled) &&
-      (item.href !== '/video/character-card' || siteConfig.characterCardEnabled)
+    (item) => item.href !== '/square' || siteConfig.squareEnabled
   );
 
   const fetchPendingTasks = useCallback(async () => {

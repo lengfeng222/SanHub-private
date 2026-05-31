@@ -167,7 +167,7 @@ export function Header({ user }: HeaderProps) {
                     placeholder="请描述遇到的问题、丢失的 UI 或想补充的功能"
                   />
                   <div className="mt-3 flex items-center justify-between gap-3 text-xs text-white/40">
-                    <span>也可联系微信：yinpinkaifa</span>
+                    <span>也可联系站内管理员处理</span>
                     <button
                       type="button"
                       className="rounded-full bg-white px-4 py-2 text-xs font-medium text-black"

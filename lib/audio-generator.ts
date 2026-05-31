@@ -99,10 +99,29 @@ function resolveLingkeVoiceModel(model?: string): string {
   return normalized;
 }
 
+function isViduMusicMvModel(model?: string): boolean {
+  const normalized = (model || '').trim().toLowerCase();
+  return normalized === 'vidu-音乐mv' || normalized === 'vidu music mv' || normalized === 'vidu-music-mv';
+}
+
 function resolveLingkeMusicModel(model?: string): string {
   const normalized = (model || '').trim();
   if (!normalized) return '海螺 音乐生成 2.5+';
   return normalized;
+}
+
+function normalizeLingkeProviderError(kind: AudioKind, detail: string, model?: string): string {
+  const prefix = kind === 'music' ? '音乐模型接口错误' : '语音模型接口错误';
+  const safeDetail = String(detail || '').trim();
+  if (/insufficient\s+balance/i.test(safeDetail)) {
+    return `${prefix}：上游渠道余额不足`;
+  }
+  if (kind === 'music' && isViduMusicMvModel(model)) {
+    if (/参数验证失败/i.test(safeDetail) || /validation/i.test(safeDetail)) {
+      return `${prefix}：VIDU-音乐MV 属于视频生成模型，请到「视频生成」页面使用，并上传音频文件后再提交`;
+    }
+  }
+  return `${prefix}: ${safeDetail || '生成失败'}`;
 }
 
 function resolveLingkeVoiceParams(model: string, voice?: string, format?: string): Record<string, unknown> {
@@ -157,6 +176,10 @@ async function generateWithLingkeMedia(request: AudioGenerateRequest, baseUrl: s
   const apiUrl = `${baseUrl.replace(/\/$/, '')}/v1/media/generate`;
   const model = request.kind === 'music' ? resolveLingkeMusicModel(rawModel) : resolveLingkeVoiceModel(rawModel);
 
+  if (request.kind === 'music' && isViduMusicMvModel(model)) {
+    throw new Error('音乐模型接口错误：VIDU-音乐MV 属于视频生成模型，请到「视频生成」页面使用，并上传音频文件后再提交');
+  }
+
   const params: Record<string, unknown> = request.kind === 'music'
     ? {
         is_instrumental: request.prompt.includes('[主歌') || request.prompt.includes('[Verse') ? 'song' : 'instrumental',
@@ -181,7 +204,8 @@ async function generateWithLingkeMedia(request: AudioGenerateRequest, baseUrl: s
   const data = await response.json().catch(() => ({}));
   if (!response.ok || Number((data as any)?.code ?? 0) !== 200) {
     const detail = String((data as any)?.msg || (data as any)?.data?.详情 || (data as any)?.data?.msg || '生成失败');
-    throw new Error(`${request.kind === 'music' ? '音乐' : '语音'}模型接口错误${response.ok ? '' : ` (${response.status})`}: ${detail}`);
+    const normalizedMessage = normalizeLingkeProviderError(request.kind, detail, model);
+    throw new Error(response.ok ? normalizedMessage : `${normalizedMessage} (${response.status})`);
   }
 
   const directUrl = pickAudioUrl((data as any)?.data) || pickAudioUrl(data);

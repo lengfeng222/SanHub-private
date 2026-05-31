@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { fetchGenerationSubmit } from '@/lib/generation-client';
+import { uploadMediaFileToPublicUrl } from '@/lib/client-media-upload';
 import {
   GENERATION_POLL_TIMEOUT_MS,
   getPollingInterval,
@@ -1705,13 +1706,17 @@ export default function WorkspaceEditorPage() {
                                 onChange={async (e) => {
                                   const file = e.target.files?.[0];
                                   if (!file) return;
-                                  const base64 = await new Promise<string>((resolve) => {
-                                    const reader = new FileReader();
-                                    reader.onload = () => resolve(reader.result as string);
-                                    reader.readAsDataURL(file);
-                                  });
-                                  updateNodeData(node.id, { uploadedImages: [base64] });
-                                  e.target.value = '';
+                                  try {
+                                    updateNodeData(node.id, { errorMessage: '正在上传参考图并转换公网 URL...' });
+                                    const uploaded = await uploadMediaFileToPublicUrl(file);
+                                    updateNodeData(node.id, { uploadedImages: [uploaded.url], errorMessage: undefined });
+                                  } catch (uploadError) {
+                                    updateNodeData(node.id, {
+                                      errorMessage: uploadError instanceof Error ? uploadError.message : '参考图上传失败',
+                                    });
+                                  } finally {
+                                    e.target.value = '';
+                                  }
                                 }}
                               />
                               <ImageIcon className="w-4 h-4 text-foreground/30" />
@@ -1794,17 +1799,25 @@ export default function WorkspaceEditorPage() {
                                 const supportsMultiple = !!(model.features as { supportMultipleImages?: boolean }).supportMultipleImages;
                                 const maxImages = supportsMultiple ? 10 : 1;
                                 const currentImages = node.data.uploadedImages || [];
-                                const newImages: string[] = [];
-                                for (const file of files.slice(0, maxImages - currentImages.length)) {
-                                  const base64 = await new Promise<string>((resolve) => {
-                                    const reader = new FileReader();
-                                    reader.onload = () => resolve(reader.result as string);
-                                    reader.readAsDataURL(file);
+                                try {
+                                  updateNodeData(node.id, { errorMessage: '正在上传参考图并转换公网 URL...' });
+                                  const newImages = await Promise.all(
+                                    files.slice(0, maxImages - currentImages.length).map(async (file) => {
+                                      const uploaded = await uploadMediaFileToPublicUrl(file);
+                                      return uploaded.url;
+                                    })
+                                  );
+                                  updateNodeData(node.id, {
+                                    uploadedImages: [...currentImages, ...newImages].slice(0, maxImages),
+                                    errorMessage: undefined,
                                   });
-                                  newImages.push(base64);
+                                } catch (uploadError) {
+                                  updateNodeData(node.id, {
+                                    errorMessage: uploadError instanceof Error ? uploadError.message : '参考图上传失败',
+                                  });
+                                } finally {
+                                  e.target.value = '';
                                 }
-                                updateNodeData(node.id, { uploadedImages: [...currentImages, ...newImages].slice(0, maxImages) });
-                                e.target.value = '';
                               }}
                             />
                             <ImageIcon className="w-4 h-4 text-foreground/30" />

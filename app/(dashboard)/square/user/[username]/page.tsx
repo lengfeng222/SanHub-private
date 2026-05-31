@@ -168,7 +168,7 @@ export default function UserProfilePage() {
 
   useEffect(() => {
     if (!siteConfig.squareEnabled) {
-      router.replace('/create');
+      router.replace('/supervideo');
     }
   }, [router, siteConfig.squareEnabled]);
 

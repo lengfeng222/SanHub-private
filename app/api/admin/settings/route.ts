@@ -175,10 +175,7 @@ export async function POST(request: NextRequest) {
           typeof featureFlags.gachaEnabled === 'boolean'
             ? featureFlags.gachaEnabled
             : current.featureFlags.gachaEnabled,
-        characterCardEnabled:
-          typeof featureFlags.characterCardEnabled === 'boolean'
-            ? featureFlags.characterCardEnabled
-            : current.featureFlags.characterCardEnabled,
+        characterCardEnabled: false,
       };
     }
 

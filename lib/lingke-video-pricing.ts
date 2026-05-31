@@ -326,8 +326,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | 文生视频 | 4/8/12 秒 | 按条计费',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: false },
+      description: '灵刻/lk666 视频模型 | 文生视频 / 参考图 | 4/8/12 秒 | 按条计费',
+      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: makeDurationOptionsFromPointMap({
@@ -343,6 +343,12 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
         preset: 'normal',
         version: 'MC-sora2特价',
         extra_params: buildExtraParams({
+          upload_mode: 'reference',
+          requires_upload: false,
+          min_reference_image_count: 1,
+          max_reference_image_count: 1,
+          reference_image_count_options: ['1'],
+          default_reference_image_count: 1,
           image_resolution_options: ['720P', '1080P'],
           version_options: ['MC-sora2特价', '优质官转OpenAI分组'],
           billing_note: '支持 MC-sora2 特价与优质官转 OpenAI 分组按次计费。',
@@ -377,8 +383,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | 文生视频 | 720P | 6/10 秒 | 按条计费',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: false },
+      description: '灵刻/lk666 视频模型 | 文生视频 / 首帧参考 | 720P/1080P | 6/10 秒 | 按条计费',
+      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: [
@@ -393,6 +399,12 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
         preset: 'normal',
         version: '默认分组',
         extra_params: buildExtraParams({
+          upload_mode: 'first_frame',
+          requires_upload: false,
+          min_reference_image_count: 1,
+          max_reference_image_count: 1,
+          reference_image_count_options: ['1'],
+          default_reference_image_count: 1,
           image_resolution_options: ['720P'],
           version_options: ['默认分组', 'MM默认分组'],
         }),
@@ -506,43 +518,6 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
           },
         },
       }),
-      imageUrl,
-      highlight: true,
-    };
-  }
-
-  if (raw === 'veo3.1-lite') {
-    return {
-      apiModel: raw,
-      name: raw,
-      description: '灵刻/lk666 视频模型 | 文生视频 | 支持 8 秒 | 默认 16:9 | 按条计费',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: false },
-      aspectRatios: [...ALL_ASPECT_RATIOS],
-      defaultAspectRatio: '16:9',
-      durations: [
-        { value: '8s', label: '8 秒', cost: yuanToPoints(0.5268) },
-      ],
-      defaultDuration: '8s',
-      videoConfigObject: {
-        aspect_ratio: '16:9',
-        video_length: 8,
-        resolution: 'SD',
-        preset: 'normal',
-        model_version: 'lite',
-        extra_params: buildExtraParams({
-          image_resolution_options: ['SD', '4K'],
-          billing_note: 'veo3.1-lite 当前上游为按次计费，不同渠道存在默认分组 / 限时体验差异。',
-        }),
-      },
-      billingMode: 'per_call',
-      billingPrice: yuanToPoints(0.5268),
-      billingUnit: 1,
-      pricingRules: buildRules([
-        { label: 'veo3.1-lite 默认分组 标清', duration: '8s', resolution: 'SD', normalPrice: yuanToPoints(0.4704) },
-        { label: 'veo3.1-lite 默认分组 4K', duration: '8s', resolution: '4K', normalPrice: yuanToPoints(0.5174) },
-        { label: 'veo3.1-lite 限时体验 标清', duration: '8s', resolution: 'SD', version: '限时体验', normalPrice: yuanToPoints(0.6586) },
-        { label: 'veo3.1-lite 限时体验 4K', duration: '8s', resolution: '4K', version: '限时体验', normalPrice: yuanToPoints(0.7245) },
-      ]),
       imageUrl,
       highlight: true,
     };
@@ -881,8 +856,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | 文生视频 | 支持 4-16 秒 | 540P/720P/1080P | 按条计费',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: false },
+      description: '灵刻/lk666 视频模型 | 文生视频 / 首尾帧参考 | 支持 4-16 秒 | 540P/720P/1080P | 按条计费',
+      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: makeDurationOptionsFromPointMap({
@@ -901,6 +876,12 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
         quality_version: '标准',
         off_peak: false,
         extra_params: buildExtraParams({
+          upload_mode: 'first_last_frame',
+          requires_upload: false,
+          min_reference_image_count: 1,
+          max_reference_image_count: 2,
+          reference_image_count_options: ['1', '2'],
+          default_reference_image_count: 1,
           image_resolution_options: ['540P', '720P', '1080P'],
           model_version_options: ['TX-Y3', 'TX-Y5'],
           quality_version_options: ['标准', '高质量'],
@@ -1073,8 +1054,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | 图生视频 | 支持 8-15 秒 | 默认 16:9',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
+      description: '灵刻/lk666 视频模型 | 文生视频 / 参考图 / 参考视频 | 支持 8-15 秒 | 默认 16:9',
+      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true, videoToVideo: true },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: makeDurationOptionsFromPointMap({
@@ -1091,7 +1072,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
         resolution: '720P',
         preset: 'normal',
         extra_params: buildExtraParams({
-          upload_mode: 'reference',
+          upload_mode: 'video_reference',
+          requires_upload: false,
           image_resolution_options: ['720P', '1080P'],
           min_reference_image_count: 1,
           max_reference_image_count: 4,
@@ -1669,8 +1651,8 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | 文生视频 | 标准/高品质 | 5/10/15 秒 | 按条计费',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: false },
+      description: '灵刻/lk666 视频模型 | 文生视频 / 首尾帧参考 | 标准/高品质 | 5/10/15 秒 | 按条计费',
+      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: makeDurationOptionsFromPointMap({
@@ -1686,6 +1668,12 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
         preset: 'normal',
         quality_version: '标准',
         extra_params: buildExtraParams({
+          upload_mode: 'first_last_frame',
+          requires_upload: false,
+          min_reference_image_count: 1,
+          max_reference_image_count: 2,
+          reference_image_count_options: ['1', '2'],
+          default_reference_image_count: 1,
           image_resolution_options: ['720P', '1080P'],
         }),
       },
@@ -1761,7 +1749,7 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     const uploadMode = raw.includes('首尾帧') || raw.toLowerCase().includes('first/last')
       ? 'first_last_frame'
       : raw.includes('全能') || raw.toLowerCase().includes('all-purpose')
-        ? 'reference'
+        ? 'video_reference'
         : 'reference';
     const isAllPurpose = raw.includes('全能') || raw.toLowerCase().includes('all-purpose');
     const baseTokensPerMillion = isAllPurpose ? 86.5536 : 86.5506;
@@ -1769,8 +1757,15 @@ function createModelConfig(name: string, imageUrl?: string): LingkeSyncedVideoMo
     return {
       apiModel: raw,
       name: raw,
-      description: '灵刻/lk666 视频模型 | Token 计费 | 默认 16:9',
-      features: { ...DEFAULT_FEATURES, textToVideo: true, imageToVideo: true },
+      description: isAllPurpose
+        ? '灵刻/lk666 视频模型 | 文生视频 / 参考图 / 参考视频 / 音频驱动 | Token 计费 | 默认 16:9'
+        : '灵刻/lk666 视频模型 | 文生视频 / 参考图 | Token 计费 | 默认 16:9',
+      features: {
+        ...DEFAULT_FEATURES,
+        textToVideo: true,
+        imageToVideo: true,
+        videoToVideo: isAllPurpose,
+      },
       aspectRatios: [...STANDARD_VIDEO_ASPECT_RATIOS],
       defaultAspectRatio: '16:9',
       durations: makeDurationOptionsFromPointMap({ 5: fallbackDisplayCost, 10: fallbackDisplayCost, 15: fallbackDisplayCost }),
@@ -1870,7 +1865,7 @@ function isVideoModelName(name: string): boolean {
   ) {
     return true;
   }
-  return /(视频|video|first frame|first\/last|reference|extension|motion control|omni-flash|veo3\.1(?:-4khd|-4k高清|-lite)?|vidu q[23]|happyhorse|wanxiang|kling|pix|sora|grok|hailuo|seedance|sd 2\.0)/i.test(name);
+  return /(视频|video|first frame|first\/last|reference|extension|motion control|omni-flash|veo3\.1(?:-4khd|-4k高清)?|vidu q[23]|happyhorse|wanxiang|kling|pix|sora|grok-video|hailuo|seedance|sd 2\.0)/i.test(name);
 }
 
 export async function fetchLingkeVisibleVideoModels(): Promise<LingkeRemoteVisibleModel[]> {

@@ -13,11 +13,11 @@ const defaultAnnouncement: Announcement = {
   title: '生成须知',
   updatedAt: 0,
   content:
-    '为保持真正的“实惠”，也为了减少带宽储存费用对成本的不必要增加，所有任务生成完毕后网站只保存24小时，生成完毕后请尽快下载到本地。本站禁止生成违规内容，色情擦边内容，如因生成违规内容失败积分不退回，请合理善用AI。网站后台有监管系统，如恶意生成违规内容账号直接封禁。本站配备了国内加速，无需魔法，如遇卡顿下载速度缓慢请关闭魔法软件。在图片和提示词没有违规的情况下生成失败，多跑几条就可以了，有时候快有时候慢，这个问题就希望大家能理解了~如果接口被ban 网页右上角会发通知 勤盯着点 有问题也可以点击反馈进行问题提交~或者向微信：yinpinkaifa 进行反馈',
+    '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。所有生成文件默认仅在本站缓存 24 小时，到期后自动删除，请及时下载保存。若遇到模型缺失、任务异常或支付问题，请优先通过站内反馈联系管理员。',
 };
 
 export function AnnouncementBanner() {
-  const [announcement, setAnnouncement] = useState<Announcement | null>(defaultAnnouncement);
+  const [announcement, setAnnouncement] = useState<Announcement | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {

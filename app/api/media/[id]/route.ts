@@ -2,13 +2,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getGeneration } from '@/lib/db';
-import { readMediaFile, isLocalFile } from '@/lib/media-storage';
+import { getGeneration, updateGeneration } from '@/lib/db';
+import {
+  readMediaFile,
+  isLocalFile,
+  readPublicRuntimeMediaFile,
+  saveMediaToPublicFile,
+  sanitizeRuntimeMediaFilename,
+  RUNTIME_MEDIA_RETENTION_MS,
+} from '@/lib/media-storage';
 import { getVideoContentUrl } from '@/lib/sora-api';
 import { resolveAndValidateUrl } from '@/lib/safe-fetch';
+import type { Generation } from '@/types';
 
 const MEDIA_CACHE_CONTROL = 'private, max-age=31536000, immutable';
+const RUNTIME_MEDIA_CACHE_CONTROL = 'private, max-age=86400, immutable';
 const MEDIA_REDIRECT_CACHE_CONTROL = 'private, max-age=3600';
+const INTERNAL_RUNTIME_MEDIA_PATH_PATTERN = /^\/api\/runtime-media\/([^/?#]+)/i;
 
 // 媒体文件服务端点
 // 支持多种存储方式：
@@ -16,6 +26,153 @@ const MEDIA_REDIRECT_CACHE_CONTROL = 'private, max-age=3600';
 // 2. 外部 URL (http/https)
 // 3. Base64 data URL (data:image/png;base64,xxx)
 // 4. Sora /content 端点 (需要 API Key 认证)
+
+function extractRuntimeMediaFilename(input: string, origin: string): string | null {
+  const relativeMatch = input.match(INTERNAL_RUNTIME_MEDIA_PATH_PATTERN);
+  if (relativeMatch?.[1]) {
+    return sanitizeRuntimeMediaFilename(decodeURIComponent(relativeMatch[1]));
+  }
+
+  try {
+    const parsed = new URL(input, origin);
+    const absoluteMatch = parsed.pathname.match(INTERNAL_RUNTIME_MEDIA_PATH_PATTERN);
+    if (!absoluteMatch?.[1]) return null;
+    return sanitizeRuntimeMediaFilename(decodeURIComponent(absoluteMatch[1]));
+  } catch {
+    return null;
+  }
+}
+
+function isExternalMediaUrl(value: string): boolean {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function resolveGenerationMediaTimestamp(generation: Generation): number {
+  const candidates = [
+    Number(generation.params?.runtimeMediaOriginTimestamp ?? 0),
+    Number(generation.params?.upstreamUpdatedAt ?? 0),
+    Number(generation.updatedAt ?? 0),
+    Number(generation.createdAt ?? 0),
+  ];
+
+  for (const value of candidates) {
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return Date.now();
+}
+
+function isGenerationMediaExpired(generation: Generation, now = Date.now()): boolean {
+  return now - resolveGenerationMediaTimestamp(generation) >= RUNTIME_MEDIA_RETENTION_MS;
+}
+
+function formatCompactUtcTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return [
+    date.getUTCFullYear(),
+    pad(date.getUTCMonth() + 1),
+    pad(date.getUTCDate()),
+    pad(date.getUTCHours()),
+    pad(date.getUTCMinutes()),
+    pad(date.getUTCSeconds()),
+  ].join('');
+}
+
+function buildRuntimeMediaCacheFilename(generation: Generation, sourceUrl: string): string {
+  const compactTimestamp = formatCompactUtcTimestamp(resolveGenerationMediaTimestamp(generation));
+
+  try {
+    const parsed = new URL(sourceUrl);
+    const basename = parsed.pathname.split('/').pop()?.trim();
+    if (basename) {
+      const safeBasename = sanitizeRuntimeMediaFilename(decodeURIComponent(basename));
+      if (safeBasename) {
+        return `${generation.id}-${compactTimestamp}-${safeBasename}`;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return `${generation.id}-${compactTimestamp}`;
+}
+
+async function cacheGenerationResultToRuntimeMedia(
+  generation: Generation,
+  sourceUrl: string,
+  origin: string
+): Promise<string | null> {
+  if (!isExternalMediaUrl(sourceUrl)) {
+    return null;
+  }
+
+  if (extractRuntimeMediaFilename(sourceUrl, origin)) {
+    return sourceUrl;
+  }
+
+  if (isGenerationMediaExpired(generation)) {
+    return null;
+  }
+
+  let safeUrl: URL;
+  try {
+    safeUrl = await resolveAndValidateUrl(sourceUrl, { origin });
+  } catch (error) {
+    console.error('[Media API] Blocked runtime cache source URL:', error);
+    return null;
+  }
+
+  let cacheSourceUrl = safeUrl.toString();
+  if (generation.type.includes('video')) {
+    try {
+      const { applyVideoProxy } = await import('@/lib/sora-api');
+      cacheSourceUrl = await applyVideoProxy(cacheSourceUrl);
+    } catch {
+      cacheSourceUrl = safeUrl.toString();
+    }
+  }
+
+  let cachedUrl: string | null = null;
+  try {
+    cachedUrl = await saveMediaToPublicFile(generation.id, cacheSourceUrl, {
+      publicBaseUrl: origin,
+      filename: buildRuntimeMediaCacheFilename(generation, sourceUrl),
+    });
+  } catch (error) {
+    console.error('[Media API] Runtime cache write failed:', error);
+    return null;
+  }
+
+  if (!cachedUrl) {
+    return null;
+  }
+
+  try {
+    const nextParams: Record<string, unknown> = {
+      ...(generation.params || {}),
+      upstreamResultUrl:
+        typeof generation.params?.upstreamResultUrl === 'string' &&
+        generation.params.upstreamResultUrl.trim()
+          ? generation.params.upstreamResultUrl.trim()
+          : sourceUrl,
+      runtimeMediaCachedAt: Date.now(),
+      runtimeMediaCachedFrom: sourceUrl,
+      runtimeMediaOriginTimestamp: resolveGenerationMediaTimestamp(generation),
+    };
+
+    await updateGeneration(generation.id, {
+      resultUrl: cachedUrl,
+      params: nextParams,
+    });
+  } catch (error) {
+    console.error('[Media API] Failed to persist runtime cache URL:', error);
+  }
+
+  return cachedUrl;
+}
 
 export async function GET(
   request: NextRequest,
@@ -69,7 +226,39 @@ export async function GET(
     if (!resultUrl) {
       return new NextResponse('No Content', { status: 204 });
     }
-    
+
+    const shouldDownload = request.nextUrl.searchParams.get('download') === '1';
+    const shouldOpen = request.nextUrl.searchParams.get('open') === '1';
+    const origin = new URL(request.url).origin;
+
+    const runtimeMediaFilename = extractRuntimeMediaFilename(resultUrl, origin);
+    if (runtimeMediaFilename) {
+      const runtimeFile = await readPublicRuntimeMediaFile(runtimeMediaFilename);
+      if (runtimeFile) {
+        return createMediaResponse(
+          request,
+          runtimeFile.buffer,
+          runtimeFile.mimeType,
+          runtimeFile.filename,
+          shouldDownload,
+          RUNTIME_MEDIA_CACHE_CONTROL
+        );
+      }
+
+      const storedAgeMs = Date.now() - resolveGenerationMediaTimestamp(generation);
+      if (
+        upstreamResultUrl &&
+        upstreamResultUrl !== resultUrl &&
+        Number.isFinite(storedAgeMs) &&
+        storedAgeMs >= 0 &&
+        storedAgeMs < RUNTIME_MEDIA_RETENTION_MS
+      ) {
+        resultUrl = upstreamResultUrl;
+      } else {
+        return new NextResponse('Media expired or missing', { status: 410 });
+      }
+    }
+
     // 检查是否是 Sora /content 端点 URL（需要 API Key 认证）
     if (resultUrl.includes('/v1/videos/') && resultUrl.includes('/content')) {
       // 从 URL 中提取 video ID
@@ -87,9 +276,6 @@ export async function GET(
         }
       }
     }
-    
-    const shouldDownload = request.nextUrl.searchParams.get('download') === '1';
-    const shouldOpen = request.nextUrl.searchParams.get('open') === '1';
 
     // 1. 本地文件存储 (file:xxx.png)
     if (isLocalFile(resultUrl)) {
@@ -102,7 +288,30 @@ export async function GET(
     
     // 2. 外部 URL，下载时走服务端代理，预览时重定向
     if (resultUrl.startsWith('http://') || resultUrl.startsWith('https://')) {
-      const origin = new URL(request.url).origin;
+      const cachedUrl = await cacheGenerationResultToRuntimeMedia(generation, resultUrl, origin);
+      if (cachedUrl) {
+        const cachedFilename = extractRuntimeMediaFilename(cachedUrl, origin);
+        if (cachedFilename) {
+          const cachedFile = await readPublicRuntimeMediaFile(cachedFilename);
+          if (cachedFile) {
+            return createMediaResponse(
+              request,
+              cachedFile.buffer,
+              cachedFile.mimeType,
+              cachedFile.filename,
+              shouldDownload,
+              RUNTIME_MEDIA_CACHE_CONTROL
+            );
+          }
+        }
+
+        resultUrl = cachedUrl;
+      }
+
+      if (isGenerationMediaExpired(generation)) {
+        return new NextResponse('Media expired or missing', { status: 410 });
+      }
+
       let safeUrl: URL;
       try {
         safeUrl = await resolveAndValidateUrl(resultUrl, { origin });
@@ -189,13 +398,14 @@ function createMediaResponse(
   buffer: Buffer,
   contentType: string,
   cacheKey: string,
-  download = false
+  download = false,
+  cacheControl = MEDIA_CACHE_CONTROL
 ): NextResponse {
   const etag = buildMediaETag(cacheKey, buffer.length, contentType);
 
   const headers: HeadersInit = {
     'Content-Type': contentType,
-    'Cache-Control': MEDIA_CACHE_CONTROL,
+    'Cache-Control': cacheControl,
     ETag: etag,
     'X-Content-Type-Options': 'nosniff',
     'Vary': 'Cookie',

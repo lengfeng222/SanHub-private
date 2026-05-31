@@ -1,20 +1,19 @@
 import Link from 'next/link';
-import { BarChart3, CreditCard, Image, MessageSquare, Settings, Sparkles, Ticket, Users, Video } from 'lucide-react';
-import { getSystemConfig, getAllUsers, getChatModels, getImageModels, getVideoModels } from '@/lib/db';
+import { BarChart3, CreditCard, Image, Settings, Sparkles, Ticket, Users, Video } from 'lucide-react';
+import { getSystemConfig, getAllUsers, getImageModels, getVideoModels } from '@/lib/db';
 import { getRecentPaymentOrders } from '@/lib/db-payments';
 
 const cards = [
   { href: '/manage/payment', title: '充值支付', desc: '配置易支付、查看前台充值入口', icon: CreditCard, color: 'from-emerald-500/25 to-cyan-500/15' },
-  { href: '/manage/models', title: '模型配置', desc: '一键进入聊天/图像/视频渠道', icon: Sparkles, color: 'from-violet-500/25 to-sky-500/15' },
+  { href: '/manage/models', title: '模型配置', desc: '统一管理图像 / 视频渠道与定价', icon: Sparkles, color: 'from-violet-500/25 to-sky-500/15' },
   { href: '/manage/users', title: '用户积分', desc: '管理用户账号、余额、封禁', icon: Users, color: 'from-blue-500/25 to-cyan-500/15' },
-  { href: '/manage/site', title: '站点设置', desc: '网站名称、公告、音频API等', icon: Settings, color: 'from-orange-500/25 to-amber-500/15' },
+  { href: '/manage/site', title: '站点设置', desc: '网站名称、公告、邮箱与展示文案', icon: Settings, color: 'from-orange-500/25 to-amber-500/15' },
 ];
 
 export default async function ManageHomePage() {
-  const [config, users, chatModels, imageModels, videoModels, recentOrders] = await Promise.all([
+  const [config, users, imageModels, videoModels, recentOrders] = await Promise.all([
     getSystemConfig(),
     getAllUsers({ limit: 5 }).catch(() => []),
-    getChatModels(true).catch(() => []),
     getImageModels(true).catch(() => []),
     getVideoModels(true).catch(() => []),
     getRecentPaymentOrders(5).catch(() => []),
@@ -53,15 +52,11 @@ export default async function ManageHomePage() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <div className="text-lg font-semibold text-white">模型接入概览</div>
-              <div className="mt-1 text-sm text-white/40">当前后台已可管理的启用模型数量</div>
+              <div className="mt-1 text-sm text-white/40">当前前台可用的图像 / 视频模型数量</div>
             </div>
             <Link href="/manage/models" className="text-xs text-white/50 transition hover:text-white">进入模型配置</Link>
           </div>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-              <div className="text-sm text-white/45">聊天模型</div>
-              <div className="mt-2 text-3xl font-semibold text-white">{chatModels.length}</div>
-            </div>
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
               <div className="text-sm text-white/45">图像模型</div>
               <div className="mt-2 text-3xl font-semibold text-white">{imageModels.length}</div>
@@ -100,7 +95,6 @@ export default async function ManageHomePage() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         {[
-          ['/manage/chat', '聊天模型', MessageSquare],
           ['/manage/image', '图像渠道', Image],
           ['/manage/video', '视频渠道', Video],
           ['/manage/cards', '卡密兑换', Ticket],

@@ -9,10 +9,27 @@ function normalizePublicBaseUrl(value?: string | null): string | null {
   try {
     const parsed = new URL(trimmed);
     const hostname = parsed.hostname.toLowerCase();
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === '0.0.0.0'
+    ) {
       return null;
     }
     return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function extractOriginFromUrl(value?: string | null): string | null {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    return normalizePublicBaseUrl(parsed.origin);
   } catch {
     return null;
   }
@@ -59,10 +76,19 @@ export function getBaseUrlFromRequest(request: Request): string {
   );
   if (envUrl) return envUrl;
 
+  const headerOrigin = extractOriginFromUrl(request.headers.get('origin'));
+  if (headerOrigin) return headerOrigin;
+
+  const refererOrigin = extractOriginFromUrl(request.headers.get('referer'));
+  if (refererOrigin) return refererOrigin;
+
   const forwardedProto = request.headers.get('x-forwarded-proto') || 'http';
   const forwardedHost = request.headers.get('x-forwarded-host') || request.headers.get('host') || 'localhost:3000';
   const forwardedUrl = normalizePublicBaseUrl(`${forwardedProto}://${forwardedHost}`);
   if (forwardedUrl) return forwardedUrl;
+
+  const requestOrigin = extractOriginFromUrl(request.url);
+  if (requestOrigin) return requestOrigin;
 
   return `${forwardedProto}://${forwardedHost}`.replace(/\/$/, '');
 }

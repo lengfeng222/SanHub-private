@@ -12,7 +12,6 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
-  MessageSquare,
   Settings,
   Sparkles,
   Ticket,
@@ -33,7 +32,6 @@ const navItems: Array<{ href: string; label: string; icon: typeof LayoutDashboar
   { href: '/manage/models', label: '模型配置', icon: Sparkles, roles: ['admin'] },
   { href: '/manage/image', label: '图像渠道', icon: Image, roles: ['admin'] },
   { href: '/manage/video', label: '视频渠道', icon: Video, roles: ['admin'] },
-  { href: '/manage/chat', label: '聊天模型', icon: MessageSquare, roles: ['admin'] },
   { href: '/manage/cards', label: '卡密兑换', icon: Ticket, roles: ['admin', 'moderator'] },
   { href: '/manage/site', label: '站点设置', icon: Settings, roles: ['admin'] },
 ];

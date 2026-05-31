@@ -134,3 +134,6 @@ json.json
 remote-*.png
 remote-*.txt
 data.db
+public/runtime-media/
+**/__pycache__/
+*.pyc

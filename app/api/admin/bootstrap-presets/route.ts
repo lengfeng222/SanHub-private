@@ -7,6 +7,7 @@ import {
   createImageModel,
   createVideoChannel,
   createVideoModel,
+  deleteVideoModel,
   getChatModels,
   getImageChannels,
   getImageModels,
@@ -28,51 +29,15 @@ import {
 } from '@/lib/model-images';
 import type { ChannelType, ImageModelFeatures, VideoChannelType, VideoModelFeatures } from '@/types';
 import { createLingkeSyncedVideoModelFromName } from '@/lib/lingke-video-pricing';
-import { fetchLingkeSyncedVideoModelsForChannel } from '@/lib/lingke-video-sync';
+import { fetchLingkeSyncedVideoModelsForChannel, getLingkeVideoAliases, isRetiredLingkeVideoModel } from '@/lib/lingke-video-sync';
+import { fetchLingkeSyncedImageModelsForChannel, getLingkeImageAliases, type LingkeSyncedImageModel } from '@/lib/lingke-image-sync';
+import { fetchLingkeRemoteChatModels, getLingkeFallbackChatModels } from '@/lib/lingke-chat-sync';
 
 export const dynamic = 'force-dynamic';
 
 type PresetKind = 'image' | 'video' | 'chat' | 'audio' | 'all' | 'lingke';
 
 const LK_BASE_URL = 'https://api.lingkeai.ai';
-
-const CHAT_VISIBLE_MODELS = [
-  ['GPT-5.5 中推理', 'gpt-5.5-medium'],
-  ['GPT-5.4 mini', 'gpt-5.4-mini'],
-  ['GPT-5.5 低推理', 'gpt-5.5-low'],
-  ['GPT-5.4 nano', 'gpt-5.4-nano'],
-  ['GPT-5.4', 'gpt-5.4'],
-  ['deepseek-v4-pro', 'deepseek-v4-pro'],
-  ['GPT-5.3 对话', 'gpt-5.3-chat-latest'],
-  ['GPT-5.5', 'gpt-5.5'],
-  ['GPT-5.4 深度推理', 'gpt-5.4-xhigh'],
-  ['MiniMax-M2.7', 'MiniMax-M2.7'],
-  ['千问 3.6 Plus', 'qwen3.6-plus'],
-  ['deepseek-v4-flash', 'deepseek-v4-flash'],
-  ['grok-4.3', 'grok-4.3'],
-  ['opus-4-7', 'claude-opus-4-7'],
-  ['grok-4-20', 'grok-4-20-non-reasoning'],
-  ['GPT-5.5 深度推理', 'gpt-5.5-xhigh'],
-  ['GPT-5.5 高推理', 'gpt-5.5-high'],
-  ['Claude Sonnet 4.6', 'claude-sonnet-4-6'],
-  ['Claude Haiku 4.5', 'claude-haiku-4-5-20251001'],
-  ['Claude Opus 4.6', 'claude-opus-4-6'],
-  ['Claude Opus 4.5', 'claude-opus-4-5-20251101'],
-  ['Gemini 3.1 Pro Preview', 'gemini-3.1-pro-preview'],
-  ['Gemini 3 Pro Preview', 'gemini-3-pro-preview'],
-  ['Gemini 3 Flash Preview', 'gemini-3-flash-preview'],
-  ['Gemini 3.1 Flash Lite Preview', 'gemini-3.1-flash-lite-preview'],
-  ['Grok 4.1', 'grok-4.1'],
-  ['Grok 4.2', 'grok-4.2'],
-  ['GPT-5.2', 'gpt-5.2'],
-  ['GPT-5.2 Chat', 'gpt-5.2-chat-latest'],
-  ['GPT-5.3 Codex', 'gpt-5.3-codex'],
-  ['千问 3.5 Plus', 'qwen3.5-plus'],
-  ['千问 3.5 Flash', 'qwen3.5-flash'],
-  ['DeepSeek V3.2', 'deepseek-v3.2'],
-  ['豆包 Seed 2.0 Pro', 'doubao-seed-2-0-pro-260215'],
-  ['豆包 Seed 1.8', 'doubao-seed-1-8-251228'],
-] as const;
 
 const IMAGE_FEATURES: ImageModelFeatures = {
   textToImage: true,
@@ -91,13 +56,22 @@ const VIDEO_FEATURES: VideoModelFeatures = {
 };
 
 const IMAGE_VISIBLE_MODELS = [
-  { name: 'GPT Image 2', apiModel: 'GPT Image 2', requiresReferenceImage: false },
-  { name: 'GPT Image 2 官转', apiModel: 'GPT Image 2 官转', requiresReferenceImage: false },
-  { name: 'Nano Banana Pro', apiModel: 'Nano Banana Pro', requiresReferenceImage: false },
-  { name: 'Nano Banana Edit', apiModel: 'Nano Banana Edit', requiresReferenceImage: true },
-  { name: '万相 2.7 图像', apiModel: '万相 2.7 图像', requiresReferenceImage: false },
-  { name: 'VIDU Image 2', apiModel: 'VIDU Image 2', requiresReferenceImage: false },
-  { name: 'SD 2.0 全能参考', apiModel: 'SD 2.0 全能参考', requiresReferenceImage: true },
+  { name: 'GPT Image 2', apiModel: 'gpt-image-2', requiresReferenceImage: false },
+  { name: 'GPT Image 2 官转', apiModel: 'gpt-image-2-guan', requiresReferenceImage: false },
+  { name: 'Nano Banana Pro', apiModel: 'gemini-3-pro-image-preview', requiresReferenceImage: false },
+  { name: 'Nano Banana 2', apiModel: 'gemini-3.1-flash-image-preview', requiresReferenceImage: false },
+  { name: 'Seedream 5.0', apiModel: 'doubao-seedream-5-0-260128', requiresReferenceImage: false },
+  { name: 'Seedream 4.5', apiModel: 'doubao-seedream-4-5-251128', requiresReferenceImage: false },
+  { name: 'Midjourney', apiModel: 'mj_imagine', requiresReferenceImage: false },
+  { name: '万相 2.7 图像', apiModel: 'wan2.7-image', requiresReferenceImage: false },
+  { name: '万相 2.6 图像', apiModel: 'wan2.6-image', requiresReferenceImage: false },
+  { name: 'VIDU Image 2', apiModel: 'vidu-image-2', requiresReferenceImage: false },
+  { name: 'Qwen-image-max', apiModel: 'qwen-image', requiresReferenceImage: false },
+  { name: 'grok-4.2-image', apiModel: 'grok-4.2-image', requiresReferenceImage: false },
+  { name: 'grok-4.1-image', apiModel: 'grok-4.1-image', requiresReferenceImage: false },
+  { name: 'Kling-V3', apiModel: 'kling-v3', requiresReferenceImage: false },
+  { name: 'Kling-V3-Omni', apiModel: 'kling-v3-omni', requiresReferenceImage: false },
+  { name: 'Kling o1', apiModel: 'kling-image-o1', requiresReferenceImage: false },
 ] as const;
 
 const VIDEO_VISIBLE_MODELS: Array<{ name: string; imageUrl?: string }> = [];
@@ -140,6 +114,30 @@ async function resolveLingkeBootstrapApiKey(providedApiKey?: string): Promise<st
   return '';
 }
 
+function toFallbackLingkeImageModel(preset: (typeof IMAGE_VISIBLE_MODELS)[number]): LingkeSyncedImageModel {
+  return {
+    apiModel: preset.apiModel,
+    matchKeys: getLingkeImageAliases(preset.apiModel, preset.name),
+    name: preset.name,
+    description: '灵刻站可见图片模型',
+    features: IMAGE_FEATURES,
+    aspectRatios: [...COMMON_RATIOS],
+    resolutions: { ...COMMON_IMAGE_RESOLUTIONS },
+    imageSizes: undefined,
+    defaultAspectRatio: '1:1',
+    defaultImageSize: undefined,
+    requiresReferenceImage: preset.requiresReferenceImage,
+    allowEmptyPrompt: false,
+    costPerGeneration: 20,
+    billingMode: 'per_call',
+    billingPrice: 20,
+    billingUnit: 1,
+    pricingRules: [],
+    imageUrl: resolveImageModelImage({ name: preset.name, apiModel: preset.apiModel }),
+    highlight: true,
+  };
+}
+
 async function ensureLingkeImagePresets(apiKey?: string) {
   const channels = await getImageChannels();
   const models = await getImageModels();
@@ -166,46 +164,103 @@ async function ensureLingkeImagePresets(apiKey?: string) {
     }
   }
 
-  for (const preset of IMAGE_VISIBLE_MODELS) {
-    const exists = models.find((item) => item.channelId === channel.id && item.name === preset.name);
+  let synced: LingkeSyncedImageModel[] = [];
+  try {
+    synced = await fetchLingkeSyncedImageModelsForChannel({
+      baseUrl: channel.baseUrl,
+      apiKey: channel.apiKey,
+    });
+  } catch {
+    synced = IMAGE_VISIBLE_MODELS.map((item) => toFallbackLingkeImageModel(item));
+  }
+
+  const currentModels = models.filter((item) => item.channelId === channel.id);
+
+  for (const preset of synced) {
+    const presetKeys = getLingkeImageAliases(
+      preset.apiModel,
+      preset.name,
+      ...(preset.matchKeys || [])
+    ).map((value) => value.toLowerCase());
+    const exists = currentModels.find((item) =>
+      getLingkeImageAliases(item.apiModel, item.name)
+        .some((candidate) => presetKeys.includes(candidate.toLowerCase()))
+    );
+
+    const nextImageUrl = resolveImageModelImage({
+      name: preset.name,
+      apiModel: preset.apiModel,
+      imageUrl: preset.imageUrl,
+    });
+
     if (exists) {
-      const nextImageUrl = resolveImageModelImage({
-        name: exists.name,
-        apiModel: exists.apiModel,
-        imageUrl: exists.imageUrl,
+      await updateImageModel(exists.id, {
+        name: preset.name,
+        description: preset.description,
+        apiModel: preset.apiModel,
+        features: preset.features,
+        aspectRatios: preset.aspectRatios,
+        resolutions: preset.resolutions,
+        imageSizes: preset.imageSizes,
+        defaultAspectRatio: preset.defaultAspectRatio,
+        defaultImageSize: preset.defaultImageSize,
+        requiresReferenceImage: preset.requiresReferenceImage,
+        allowEmptyPrompt: preset.allowEmptyPrompt,
+        highlight: preset.highlight ?? exists.highlight,
+        enabled: true,
+        costPerGeneration: preset.costPerGeneration,
+        billingMode: preset.billingMode,
+        billingPrice: preset.billingPrice,
+        billingUnit: preset.billingUnit,
+        pricingRules: preset.pricingRules,
+        imageUrl: nextImageUrl,
       });
-      if ((!exists.imageUrl || isPlaceholderModelImageUrl(exists.imageUrl)) && nextImageUrl) {
-        await updateImageModel(exists.id, { imageUrl: nextImageUrl });
-        created.push(`图像模型已补图: ${preset.name}`);
-      }
+      created.push(`图像模型已同步: ${preset.name}`);
       continue;
     }
+
     const model = await createImageModel({
       channelId: channel.id,
       name: preset.name,
-      description: '灵刻站可见图片模型',
+      description: preset.description,
       apiModel: preset.apiModel,
       baseUrl: undefined,
       apiKey: undefined,
-      features: IMAGE_FEATURES,
-      aspectRatios: [...COMMON_RATIOS],
-      resolutions: { ...COMMON_IMAGE_RESOLUTIONS },
-      imageSizes: undefined,
-      defaultAspectRatio: '1:1',
-      defaultImageSize: undefined,
+      features: preset.features,
+      aspectRatios: preset.aspectRatios,
+      resolutions: preset.resolutions,
+      imageSizes: preset.imageSizes,
+      defaultAspectRatio: preset.defaultAspectRatio,
+      defaultImageSize: preset.defaultImageSize,
       requiresReferenceImage: preset.requiresReferenceImage,
-      allowEmptyPrompt: false,
-      highlight: true,
+      allowEmptyPrompt: preset.allowEmptyPrompt,
+      highlight: preset.highlight ?? true,
       enabled: true,
-      costPerGeneration: 20,
-      billingMode: 'per_call',
-      billingPrice: 20,
-      billingUnit: 1,
-      imageUrl: resolveImageModelImage({ name: preset.name, apiModel: preset.apiModel }),
-      sortOrder: models.filter((item) => item.channelId === channel.id).length,
+      costPerGeneration: preset.costPerGeneration,
+      billingMode: preset.billingMode,
+      billingPrice: preset.billingPrice,
+      billingUnit: preset.billingUnit,
+      pricingRules: preset.pricingRules,
+      imageUrl: nextImageUrl,
+      sortOrder: currentModels.length,
     });
-    models.push(model);
+    currentModels.push(model);
     created.push(`图像模型: ${preset.name}`);
+  }
+
+  const syncedAliasSet = new Set(
+    synced.flatMap((item) =>
+      getLingkeImageAliases(item.apiModel, item.name, ...(item.matchKeys || []))
+        .map((value) => value.toLowerCase())
+    )
+  );
+
+  for (const model of currentModels) {
+    const matched = getLingkeImageAliases(model.apiModel, model.name)
+      .some((candidate) => syncedAliasSet.has(candidate.toLowerCase()));
+    if (matched || !model.enabled) continue;
+    await updateImageModel(model.id, { enabled: false });
+    created.push(`图像模型已停用: ${model.name}`);
   }
 
   return created;
@@ -250,7 +305,18 @@ async function ensureLingkeVideoPresets(apiKey?: string) {
   const currentModels = models.filter((item) => item.channelId === channel.id);
 
   for (const preset of synced) {
-    const exists = currentModels.find((item) => item.apiModel === preset.apiModel || item.name === preset.name);
+    if (isRetiredLingkeVideoModel(preset.apiModel, preset.name, ...(preset.matchKeys || []))) {
+      continue;
+    }
+    const presetKeys = getLingkeVideoAliases(
+      preset.apiModel,
+      preset.name,
+      ...(preset.matchKeys || [])
+    ).map((value) => value.toLowerCase());
+    const exists = currentModels.find((item) =>
+      getLingkeVideoAliases(item.apiModel, item.name)
+        .some((candidate) => presetKeys.includes(candidate.toLowerCase()))
+    );
     const nextImageUrl = resolveVideoModelImage({
       name: preset.name,
       apiModel: preset.apiModel,
@@ -312,6 +378,27 @@ async function ensureLingkeVideoPresets(apiKey?: string) {
     created.push(`视频模型: ${preset.name}`);
   }
 
+  const syncedAliasSet = new Set(
+    synced.flatMap((item) =>
+      getLingkeVideoAliases(item.apiModel, item.name, ...(item.matchKeys || []))
+        .map((value) => value.toLowerCase())
+    )
+  );
+
+  for (const model of currentModels) {
+    if (isRetiredLingkeVideoModel(model.apiModel, model.name)) {
+      await deleteVideoModel(model.id);
+      created.push(`视频模型已删除: ${model.name}`);
+      continue;
+    }
+    const matched = getLingkeVideoAliases(model.apiModel, model.name)
+      .some((candidate) => syncedAliasSet.has(candidate.toLowerCase()));
+    if (matched) continue;
+    if (!model.enabled) continue;
+    await updateVideoModel(model.id, { enabled: false });
+    created.push(`视频模型已停用: ${model.name}`);
+  }
+
   return created;
 }
 
@@ -319,34 +406,44 @@ async function ensureLingkeChatPresets(apiKey?: string) {
   const models = await getChatModels(false);
   const created: string[] = [];
 
-  for (const [name, modelId] of CHAT_VISIBLE_MODELS) {
-    const exists = models.find((item) => item.name === name || item.modelId === modelId);
+  const normalizedApiKey = apiKey?.trim() || '';
+  const synced =
+    normalizedApiKey
+      ? await fetchLingkeRemoteChatModels(LK_BASE_URL, normalizedApiKey).catch(() => getLingkeFallbackChatModels())
+      : getLingkeFallbackChatModels();
+
+  const syncedModelIds = new Set(synced.map((item) => item.modelId));
+
+  for (const preset of synced) {
+    const exists = models.find((item) => item.modelId === preset.modelId || item.name === preset.name);
     if (!exists) {
       const createdModel = await createChatModel({
-        name,
+        name: preset.name,
         apiUrl: `${LK_BASE_URL}/v1/chat/completions`,
-        apiKey: apiKey || '',
-        modelId,
-        supportsVision: false,
-        maxTokens: 128000,
-        costPerMessage: 1,
-        billingMode: 'per_call',
-        billingPrice: 1,
-        billingUnit: 1,
-        imageUrl: resolveChatModelImage({ name, modelId }),
+        apiKey: normalizedApiKey,
+        modelId: preset.modelId,
+        supportsVision: preset.supportsVision,
+        maxTokens: preset.maxTokens,
+        costPerMessage: preset.costPerMessage,
+        billingMode: preset.billingMode,
+        billingPrice: preset.billingPrice,
+        billingUnit: preset.billingUnit,
+        imageUrl: resolveChatModelImage({ name: preset.name, modelId: preset.modelId, imageUrl: preset.imageUrl }),
         enabled: true,
       });
       models.push(createdModel);
-      created.push(`聊天模型: ${name}`);
+      created.push(`聊天模型: ${preset.name}`);
       continue;
     }
 
     const updates: Parameters<typeof updateChatModel>[1] = {};
-    if (!exists.apiUrl) updates.apiUrl = `${LK_BASE_URL}/v1/chat/completions`;
-    if (apiKey && !exists.apiKey) updates.apiKey = apiKey;
+    if (exists.name !== preset.name) updates.name = preset.name;
+    if (exists.apiUrl !== `${LK_BASE_URL}/v1/chat/completions`) updates.apiUrl = `${LK_BASE_URL}/v1/chat/completions`;
+    if (normalizedApiKey && exists.apiKey !== normalizedApiKey) updates.apiKey = normalizedApiKey;
+    if (!exists.enabled) updates.enabled = true;
     const nextImageUrl = resolveChatModelImage({
-      name: exists.name,
-      modelId: exists.modelId,
+      name: preset.name,
+      modelId: preset.modelId,
       imageUrl: exists.imageUrl,
     });
     if ((!exists.imageUrl || isPlaceholderModelImageUrl(exists.imageUrl) || exists.imageUrl === '/huantu-logo.jpg') && nextImageUrl) {
@@ -354,8 +451,19 @@ async function ensureLingkeChatPresets(apiKey?: string) {
     }
     if (Object.keys(updates).length > 0) {
       await updateChatModel(exists.id, updates);
-      created.push(`聊天模型已补全: ${name}`);
+      created.push(`聊天模型已同步: ${preset.name}`);
     }
+  }
+
+  for (const model of models) {
+    const apiUrl = String(model.apiUrl || '').trim();
+    const isLingkeModel =
+      !apiUrl ||
+      apiUrl.includes('api.lingkeai.ai') ||
+      apiUrl.endsWith('/v1/chat/completions');
+    if (!isLingkeModel || syncedModelIds.has(model.modelId) || !model.enabled) continue;
+    await updateChatModel(model.id, { enabled: false });
+    created.push(`聊天模型已停用: ${model.name}`);
   }
 
   return created;

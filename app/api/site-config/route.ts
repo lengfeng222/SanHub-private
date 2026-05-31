@@ -17,7 +17,6 @@ export async function GET() {
         defaultBalance: config.defaultBalance,
         squareEnabled: config.featureFlags.squareEnabled,
         gachaEnabled: config.featureFlags.gachaEnabled,
-        characterCardEnabled: config.featureFlags.characterCardEnabled,
         inviteEnabled: config.inviteSettings.enabled,
         inviteRewardEnabled: config.inviteSettings.rewardEnabled,
         inviteeBonusPoints: config.inviteSettings.inviteeBonusPoints,

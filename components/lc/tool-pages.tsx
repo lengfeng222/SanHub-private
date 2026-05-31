@@ -16,7 +16,7 @@ import {
   Volume2,
   Wand2,
 } from 'lucide-react';
-import { formatBillingSummary } from '@/lib/billing';
+import { calculateBillingCost, formatBillingSummary } from '@/lib/billing';
 import {
   getEffectiveMembershipLevel,
   MEMBERSHIP_LABELS,
@@ -43,6 +43,19 @@ import {
   replaceActiveTasks,
 } from '@/lib/generation-client';
 import { resolveVideoModelImage } from '@/lib/model-images';
+import { uploadMediaFileToPublicUrl } from '@/lib/client-media-upload';
+import {
+  formatMediaDurationRange,
+  parseMediaDurationRangeFromText,
+  roundMediaDurationSeconds,
+  type MediaDurationRange,
+  validateMediaDurationAgainstRange,
+} from '@/lib/media-duration-rules';
+import {
+  localizeVideoDynamicOptionLabel,
+  localizeVideoUploadDescription,
+  localizeVideoUploadLabel,
+} from '@/lib/video-upload-presenter';
 import { resolveVideoModelLabel } from '@/lib/video-model-label';
 import { CustomSelect } from '@/components/ui/select-custom';
 import { ResultGallery, type Task } from '@/components/generator/result-gallery';
@@ -70,11 +83,13 @@ type UploadedMedia = {
   mimeType: string;
   data: string;
   slot?: VideoUploadSlot;
+  size?: number;
+  durationSeconds?: number;
 };
 
 const IMAGE_MODEL_FALLBACKS: Record<ImageVariant, string[]> = {
   gptimage: ['GPT2 图像生成', 'GPT-Image-2', 'gpt-image-2'],
-  nanobanana: ['大香蕉2', 'Nano Banana Pro', 'Nano Banana Edit'],
+  nanobanana: ['大香蕉2', 'Nano Banana Pro', 'Nano Banana 2'],
 };
 
 const VIDEO_MODEL_FALLBACKS: Record<VideoVariant, string[]> = {
@@ -121,23 +136,33 @@ type VideoModelSummary = Pick<
   defaultDuration?: string;
 };
 
-type VideoUploadSlot =
-  | 'generic'
-  | 'reference-image'
-  | 'reference-video'
-  | 'first-frame'
-  | 'first-last-frames'
-  | 'last-frame'
-  | 'motion-reference';
+type VideoUploadSlot = string;
 
 type VideoReferenceSlotConfig = {
   key: VideoUploadSlot;
   label: string;
   hint: string;
   accept: string;
+  kind: 'image' | 'video' | 'audio';
+  paramName?: string;
   multiple?: boolean;
   minFiles?: number;
   maxFiles?: number;
+  required?: boolean;
+  durationRange?: MediaDurationRange | null;
+};
+
+type VideoDynamicSelectOption = {
+  value: string;
+  label: string;
+  rawValue: unknown;
+};
+
+type VideoAdvancedSelectField = {
+  key: string;
+  label: string;
+  options: VideoDynamicSelectOption[];
+  source: 'top-level' | 'extra';
 };
 
 type VideoModelFamilyKey =
@@ -160,6 +185,14 @@ type VideoModelCardMeta = {
   badge: string;
   imageUrl: string;
   billingText: string;
+};
+
+type GroupedVideoModelsSection = {
+  key: VideoModelFamilyKey;
+  label: string;
+  subtitle: string;
+  accent: string;
+  models: VideoModelSummary[];
 };
 
 const VIDEO_MODEL_FAMILY_STYLES: Record<
@@ -258,6 +291,21 @@ const VIDEO_MODEL_FAMILY_STYLES: Record<
   },
 };
 
+const VIDEO_MODEL_FAMILY_ORDER: VideoModelFamilyKey[] = [
+  'veo',
+  'kling',
+  'vidu',
+  'wanxiang',
+  'pixverse',
+  'happyhorse',
+  'sora',
+  'grok',
+  'hailuo',
+  'jimeng',
+  'runway',
+  'default',
+];
+
 function makeFallbackVideoModels(variant: VideoVariant): VideoModelSummary[] {
   return VIDEO_MODEL_FALLBACKS[variant].map((name, index) => ({
     id: `__fallback_video_${index}`,
@@ -290,7 +338,7 @@ function makeFallbackVideoModels(variant: VideoVariant): VideoModelSummary[] {
 function makeFallbackImageModels(variant: ImageVariant): SafeImageModel[] {
   const isGpt = variant === 'gptimage';
   const base = isGpt ? 'GPT Image 2' : 'Nano Banana Pro';
-  const alt = isGpt ? 'GPT-Image-2' : 'Nano Banana Edit';
+  const alt = isGpt ? 'GPT-Image-2' : 'Nano Banana 2';
   const models = [
     { id: `__fallback_image_0`, name: base, description: '', highlight: true, apiModel: base },
     { id: `__fallback_image_1`, name: alt, description: '', highlight: false, apiModel: alt },
@@ -361,27 +409,97 @@ function resolveVideoModelFamily(model: VideoModelSummary): VideoModelFamilyKey 
   return 'default';
 }
 
+function getVideoModelUploadKinds(model?: VideoModelSummary) {
+  const uploadMeta = Object.values(getVideoUploadParamMeta(model));
+  return {
+    hasImage: uploadMeta.some((item) => item.kind === 'image'),
+    hasVideo: uploadMeta.some((item) => item.kind === 'video'),
+    hasAudio: uploadMeta.some((item) => item.kind === 'audio'),
+  };
+}
+
 function getVideoModelKindLabel(model: VideoModelSummary): string {
-  const raw = `${model.name} ${model.apiModel || ''}`.toLowerCase();
-  if (model.features?.videoToVideo || raw.includes('编辑')) return '视频编辑';
-  if (raw.includes('首尾帧')) return '首尾帧';
-  if (raw.includes('参考生') || raw.includes('参考')) return '图生视频';
-  if (raw.includes('续写')) return '视频续写';
-  if (raw.includes('文生')) return '文生视频';
-  if (model.features?.imageToVideo) return '图生视频';
-  return '文生视频';
+  const inputMode = getVideoModelInputMode(model);
+  const { hasImage, hasVideo, hasAudio } = getVideoModelUploadKinds(model);
+  switch (inputMode) {
+    case 'motion_control':
+      return hasAudio ? '动作控制 / 音频' : '动作控制';
+    case 'video_continue':
+      return hasAudio ? '视频续写 / 音频' : '视频续写';
+    case 'video_edit':
+      return hasAudio ? '视频编辑 / 音频' : '视频编辑';
+    case 'video_reference':
+      return hasAudio
+        ? (model.features?.textToVideo ? '文生 / 视频参考 / 音频' : '视频参考 / 音频')
+        : model.features?.textToVideo ? '文生 / 视频参考' : '视频参考';
+    case 'first_last_frame':
+      return hasAudio
+        ? (model.features?.textToVideo ? '文生 / 首尾帧 / 音频' : '首尾帧 / 音频')
+        : model.features?.textToVideo ? '文生 / 首尾帧' : '首尾帧';
+    case 'first_frame':
+      return hasAudio
+        ? (model.features?.textToVideo ? '文生 / 首帧 / 音频' : '首帧 / 音频')
+        : model.features?.textToVideo ? '文生 / 首帧' : '首帧参考';
+    case 'reference':
+      if (!hasImage && hasAudio && !hasVideo) {
+        return model.features?.textToVideo ? '文生 / 音频驱动' : '音频驱动';
+      }
+      return hasAudio
+        ? (model.features?.textToVideo ? '文生 / 参考图 / 音频' : '图生 / 音频')
+        : model.features?.textToVideo ? '文生 / 参考图' : '图生视频';
+    case 'text':
+    default:
+      if (hasAudio && !hasImage && !hasVideo) {
+        return model.features?.textToVideo ? '文生 / 音频驱动' : '音频驱动';
+      }
+      if (model.features?.textToVideo && (model.features?.imageToVideo || hasImage)) {
+        return '文生 / 参考图';
+      }
+      return model.features?.imageToVideo ? '图生视频' : '文生视频';
+  }
 }
 
 function getVideoModelBadge(model: VideoModelSummary): string {
   if (model.highlight) return '推荐';
-  const raw = `${model.name} ${model.apiModel || ''}`.toLowerCase();
-  if (raw.includes('首尾帧')) return '首尾帧';
-  if (raw.includes('参考生') || raw.includes('参考')) return '参考生';
-  if (raw.includes('视频编辑') || raw.includes('编辑')) return '编辑';
-  if (raw.includes('续写')) return '续写';
-  if (raw.includes('动作控制')) return '动作';
-  if (raw.includes('文生')) return '文生';
-  return model.features?.imageToVideo ? '图生' : '文生';
+  const { hasAudio, hasImage, hasVideo } = getVideoModelUploadKinds(model);
+  switch (getVideoModelInputMode(model)) {
+    case 'motion_control':
+      return hasAudio ? '动+音' : '动作';
+    case 'video_continue':
+      return hasAudio ? '续+音' : '续写';
+    case 'video_edit':
+      return hasAudio ? '编+音' : '编辑';
+    case 'video_reference':
+      return hasAudio ? '视+音' : '视频参考';
+    case 'first_last_frame':
+      return hasAudio ? '帧+音' : '首尾帧';
+    case 'first_frame':
+      return hasAudio ? '首帧+音' : '首帧';
+    case 'reference':
+      if (!hasImage && hasAudio && !hasVideo) return '音频';
+      return hasAudio ? '图+音' : model.features?.textToVideo ? '参考图' : '图生';
+    case 'text':
+    default:
+      if (hasAudio && !hasImage && !hasVideo) return '音频';
+      if (model.features?.textToVideo && (model.features?.imageToVideo || hasImage)) return '参考图';
+      return model.features?.imageToVideo ? '图生' : '文生';
+  }
+}
+
+function getVideoModelDisplayDescription(model: VideoModelSummary): string {
+  const parts: string[] = [getVideoModelKindLabel(model)];
+  const resolutions = getVideoResolutionOptions(model).slice(0, 3);
+  if (resolutions.length > 0) {
+    parts.push(resolutions.join(' / '));
+  }
+  const durationLabels = (model.durations || [])
+    .slice(0, 4)
+    .map((item) => item.label || item.value)
+    .filter(Boolean);
+  if (durationLabels.length > 0) {
+    parts.push(durationLabels.join(' / '));
+  }
+  return parts.join(' | ');
 }
 
 function buildVideoModelCover(model: VideoModelSummary): string {
@@ -500,6 +618,29 @@ function getVideoModelExtraParams(model?: VideoModelSummary): Record<string, unk
   return {};
 }
 
+function sanitizeVideoUploadHintText(text: string, paramName?: string): string {
+  const raw = String(text || '').trim();
+  if (!raw && paramName === 'assets') {
+    return '上传角色、场景或道具图片，系统会自动转成上游所需 assets JSON，并生成公网 URL。';
+  }
+
+  const withoutUpstreamHostNotice = raw
+    .replace(/（?仅接受可公开访问的\s*URL；多文件可传\s*URL\s*数组。平台不提供文件托管，请自行将文件上传至\s*COS\/CDN\s*等对象存储服务后传入\s*URL）?/gi, '')
+    .replace(/\(?only accepts publicly accessible urls?;?.*?platform does not provide file hosting.*?url\)?/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (paramName === 'assets') {
+    return '上传角色、场景或道具图片，系统会自动转成上游所需 assets JSON，并生成公网 URL。';
+  }
+
+  if (!withoutUpstreamHostNotice) {
+    return '支持直接上传素材，系统会自动转为公网 URL，并在本站服务器保留 24 小时。';
+  }
+
+  return `${withoutUpstreamHostNotice} · 支持直接上传，系统会自动转为公网 URL，并在本站服务器保留 24 小时。`;
+}
+
 function getVideoUploadParamMeta(model?: VideoModelSummary): Record<string, {
   kind?: 'image' | 'video' | 'audio';
   label?: string;
@@ -525,19 +666,112 @@ function getVideoUploadParamMeta(model?: VideoModelSummary): Record<string, {
   return {};
 }
 
+function getVideoRequiredUploadParamNames(model?: VideoModelSummary): Set<string> {
+  const extra = getVideoModelExtraParams(model);
+  const keys = [
+    'required_upload_param_names',
+    'required_image_upload_param_names',
+    'required_video_upload_param_names',
+    'required_audio_upload_param_names',
+  ];
+
+  return new Set(
+    keys.flatMap((key) => {
+      const value = extra[key];
+      return Array.isArray(value)
+        ? value.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+    })
+  );
+}
+
+function doesVideoModelRequireUpload(model?: VideoModelSummary): boolean {
+  const extra = getVideoModelExtraParams(model);
+  return extra.requires_upload === true;
+}
+
+async function readBrowserMediaDurationSeconds(file: File): Promise<number | null> {
+  if (typeof window === 'undefined') return null;
+
+  const mimeType = String(file.type || '').toLowerCase();
+  if (!mimeType.startsWith('audio/') && !mimeType.startsWith('video/')) {
+    return null;
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const media = document.createElement(mimeType.startsWith('audio/') ? 'audio' : 'video');
+  media.preload = 'metadata';
+  media.muted = true;
+
+  try {
+    const duration = await new Promise<number | null>((resolve) => {
+      let settled = false;
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        media.removeAttribute('src');
+        media.load();
+        URL.revokeObjectURL(objectUrl);
+      };
+
+      const finish = (value: number | null) => {
+        cleanup();
+        resolve(value);
+      };
+
+      const timeoutId = window.setTimeout(() => finish(null), 8000);
+      media.onloadedmetadata = () => {
+        window.clearTimeout(timeoutId);
+        const value = Number(media.duration);
+        finish(Number.isFinite(value) && value > 0 ? value : null);
+      };
+      media.onerror = () => {
+        window.clearTimeout(timeoutId);
+        finish(null);
+      };
+
+      media.src = objectUrl;
+    });
+
+    return duration;
+  } catch {
+    URL.revokeObjectURL(objectUrl);
+    return null;
+  }
+}
+
+function buildVideoDurationValidationMessage(
+  label: string,
+  durationSeconds: number,
+  range: MediaDurationRange | null | undefined
+): string | null {
+  const violation = validateMediaDurationAgainstRange(durationSeconds, range);
+  if (!violation) return null;
+
+  const rangeText = formatMediaDurationRange(violation);
+  const durationText = roundMediaDurationSeconds(durationSeconds);
+  return `${label}当前时长为 ${durationText} 秒，需满足 ${rangeText}`;
+}
+
 function buildVideoSlotFromMeta(
   key: VideoUploadSlot,
   fallbackLabel: string,
   fallbackHint: string,
   fallbackAccept: string,
+  fallbackKind: 'image' | 'video' | 'audio',
   meta?: {
+    kind?: 'image' | 'video' | 'audio';
     label?: string;
     description?: string;
     multiple?: boolean;
     minFiles?: number;
     maxFiles?: number;
     accept?: string;
-  }
+  },
+  options: {
+    paramName?: string;
+    required?: boolean;
+  } = {}
 ): VideoReferenceSlotConfig {
   const maxFiles = Number(meta?.maxFiles || 0);
   const minFiles = Number(meta?.minFiles || 0);
@@ -545,23 +779,63 @@ function buildVideoSlotFromMeta(
   const countHint = maxFiles > 1
     ? `支持 ${minFiles > 0 ? `${minFiles}-${maxFiles}` : `最多 ${maxFiles}`} 个文件`
     : '';
+  const isAssetsParam = options.paramName === 'assets' || key === 'assets';
+  const resolvedKind = meta?.kind || fallbackKind;
+  const label = isAssetsParam
+    ? '角色 / 场景素材图'
+    : localizeVideoUploadLabel(meta?.label || fallbackLabel, options.paramName || key, resolvedKind);
+  const durationRange = parseMediaDurationRangeFromText(meta?.description);
+  const localizedDescription = localizeVideoUploadDescription(
+    meta?.description,
+    fallbackHint,
+    options.paramName || key,
+    label,
+    resolvedKind,
+  );
+  const primaryHint = sanitizeVideoUploadHintText(
+    localizedDescription || fallbackHint || '',
+    options.paramName || key,
+  );
+  const durationHint = durationRange ? `时长限制 ${formatMediaDurationRange(durationRange)}` : '';
 
   return {
     key,
-    label: meta?.label || fallbackLabel,
-    hint: [meta?.description || fallbackHint, countHint].filter(Boolean).join(' · '),
+    label,
+    hint: [primaryHint, durationHint, countHint].filter(Boolean).join(' · '),
     accept: meta?.accept || fallbackAccept,
+    kind: resolvedKind,
+    paramName: options.paramName,
     multiple,
     minFiles: minFiles > 0 ? minFiles : undefined,
     maxFiles: maxFiles > 0 ? maxFiles : undefined,
+    required: options.required,
+    durationRange,
   };
 }
 
 function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotConfig[] {
   const mode = getVideoModelInputMode(model);
   const uploadMeta = Object.entries(getVideoUploadParamMeta(model));
+  const requiredParamNames = getVideoRequiredUploadParamNames(model);
   const imageMeta = uploadMeta.find(([, value]) => value.kind === 'image')?.[1];
   const videoMeta = uploadMeta.find(([, value]) => value.kind === 'video')?.[1];
+
+  if (uploadMeta.length > 0) {
+    return uploadMeta.map(([paramName, meta]) =>
+      buildVideoSlotFromMeta(
+        paramName,
+        meta.label || paramName,
+        meta.description || '上传模型所需素材',
+        meta.accept || (meta.kind === 'video' ? 'video/*' : meta.kind === 'audio' ? 'audio/*' : 'image/*'),
+        meta.kind || 'image',
+        meta,
+        {
+          paramName,
+          required: requiredParamNames.has(paramName),
+        },
+      )
+    );
+  }
 
   if (mode === 'first_last_frame' && imageMeta) {
     return [
@@ -570,6 +844,7 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
         '首帧 / 尾帧参考',
         '按顺序上传 1-2 张图片：第一张为首帧，第二张为尾帧',
         'image/*',
+        'image',
         {
           ...imageMeta,
           multiple: true,
@@ -586,6 +861,7 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
         '首帧参考',
         '上传单张首帧作为镜头起始',
         'image/*',
+        'image',
         imageMeta,
       ),
     ];
@@ -600,6 +876,7 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           mode === 'video_continue' ? '续写视频' : '参考视频',
           mode === 'video_edit' ? '上传待编辑视频，延续原视频内容' : '上传参考视频，跟随上游能力继续生成',
           'video/*',
+          'video',
           videoMeta,
         )
       );
@@ -611,6 +888,7 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           '参考图',
           '上传参考图片，辅助主体、风格或镜头控制',
           'image/*',
+          'image',
           imageMeta,
         )
       );
@@ -625,6 +903,7 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
         '参考图',
         '上传参考图片，控制主体、风格或构图',
         'image/*',
+        'image',
         imageMeta,
       ),
     ];
@@ -638,12 +917,20 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           label: '首帧参考',
           hint: '上传开场关键帧，控制起始画面',
           accept: 'image/*',
+          kind: 'image',
+          minFiles: 1,
+          maxFiles: 1,
+          required: true,
         },
         {
           key: 'last-frame',
           label: '尾帧参考',
           hint: '上传收尾关键帧，控制结束画面',
           accept: 'image/*',
+          kind: 'image',
+          minFiles: 1,
+          maxFiles: 1,
+          required: true,
         },
       ];
     case 'first_frame':
@@ -653,6 +940,10 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           label: '首帧参考',
           hint: '上传单张首帧作为镜头起始',
           accept: 'image/*',
+          kind: 'image',
+          minFiles: 1,
+          maxFiles: 1,
+          required: true,
         },
       ];
     case 'video_reference':
@@ -664,15 +955,31 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           label: mode === 'video_continue' ? '续写视频' : '参考视频',
           hint: mode === 'video_edit' ? '上传待编辑视频，延续原视频内容' : '上传视频素材，跟随上游能力继续生成',
           accept: 'video/*',
+          kind: 'video',
+          minFiles: 1,
+          required: true,
         },
       ];
     case 'motion_control':
       return [
         {
           key: 'motion-reference',
-          label: '动作参考图',
-          hint: '上传人物/主体图，按动作控制能力生成',
+          label: '主体参考图',
+          hint: '上传人物/主体图，用于动作控制与外观锁定',
           accept: 'image/*',
+          kind: 'image',
+          minFiles: 1,
+          maxFiles: 1,
+          required: true,
+        },
+        {
+          key: 'reference-video',
+          label: '动作参考视频',
+          hint: '上传动作参考视频，让生成结果跟随动作轨迹',
+          accept: 'video/*',
+          kind: 'video',
+          minFiles: 1,
+          required: true,
         },
       ];
     case 'reference':
@@ -682,19 +989,14 @@ function getModelReferenceSlots(model?: VideoModelSummary): VideoReferenceSlotCo
           label: '参考图',
           hint: '上传参考图片，控制主体、风格或构图',
           accept: 'image/*',
+          kind: 'image',
           multiple: true,
+          minFiles: 1,
+          required: true,
         },
       ];
     default:
-      return [
-        {
-          key: 'generic',
-          label: '参考素材',
-          hint: '可上传参考图或参考视频辅助生成',
-          accept: 'image/*,video/*',
-          multiple: true,
-        },
-      ];
+      return [];
   }
 }
 
@@ -714,6 +1016,41 @@ function getVideoDurationOptions(model?: VideoModelSummary) {
     { value: '8s', label: '8 秒', cost: 0 },
     { value: '10s', label: '10 秒', cost: 0 },
   ];
+}
+
+function normalizeIncomingVideoAspectRatios(value: unknown): Array<{ value: string; label: string }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const ratioValue = String((item as { value?: unknown }).value ?? '').trim();
+      if (!ratioValue) return null;
+      const rawLabel = String((item as { label?: unknown }).label ?? ratioValue).trim() || ratioValue;
+      return {
+        value: ratioValue,
+        label: localizeVideoDynamicOptionLabel('aspect_ratio', rawLabel, ratioValue),
+      };
+    })
+    .filter(Boolean) as Array<{ value: string; label: string }>;
+}
+
+function normalizeIncomingVideoDurations(
+  value: unknown
+): Array<{ value: string; label: string; cost: number }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const durationValue = String((item as { value?: unknown }).value ?? '').trim();
+      if (!durationValue) return null;
+      const rawLabel = String((item as { label?: unknown }).label ?? durationValue).trim() || durationValue;
+      return {
+        value: durationValue,
+        label: localizeVideoDynamicOptionLabel('duration', rawLabel, durationValue.replace(/s$/i, '')),
+        cost: Number((item as { cost?: unknown }).cost || 0),
+      };
+    })
+    .filter(Boolean) as Array<{ value: string; label: string; cost: number }>;
 }
 
 function getVideoResolutionOptions(model?: VideoModelSummary): string[] {
@@ -743,9 +1080,11 @@ function getVideoReferenceCountOptions(model?: VideoModelSummary): string[] {
     if (next.length > 0) return next;
   }
 
-  const min = Number(extra.min_reference_image_count ?? 1);
-  const max = Number(extra.max_reference_image_count ?? 4);
-  if (Number.isFinite(min) && Number.isFinite(max) && max >= min && max > 1) {
+  const hasExplicitMin = Object.prototype.hasOwnProperty.call(extra, 'min_reference_image_count');
+  const hasExplicitMax = Object.prototype.hasOwnProperty.call(extra, 'max_reference_image_count');
+  const min = Number(extra.min_reference_image_count);
+  const max = Number(extra.max_reference_image_count);
+  if ((hasExplicitMin || hasExplicitMax) && Number.isFinite(min) && Number.isFinite(max) && max >= min && max > 1) {
     return Array.from({ length: Math.min(6, max - min + 1) }, (_, index) => String(min + index));
   }
 
@@ -762,29 +1101,402 @@ function getDefaultReferenceCount(model?: VideoModelSummary) {
   return getVideoReferenceCountOptions(model)[0] || '1';
 }
 
+function shouldAttachReferenceCount(model?: VideoModelSummary) {
+  const extra = getVideoModelExtraParams(model);
+  if (Array.isArray(extra.reference_image_count_options) && extra.reference_image_count_options.length > 0) {
+    return true;
+  }
+  if (Object.prototype.hasOwnProperty.call(extra, 'default_reference_image_count')) {
+    return true;
+  }
+  const inputMode = getVideoModelInputMode(model);
+  return inputMode === 'reference' || inputMode === 'motion_control';
+}
+
 function getDefaultResolution(model?: VideoModelSummary) {
   const modelDefault = String(model?.videoConfigObject?.resolution || '').trim();
   if (modelDefault) return modelDefault.toUpperCase();
   return getVideoResolutionOptions(model)[0] || '';
 }
 
+const VIDEO_ADVANCED_LABELS: Record<string, string> = {
+  version: '版本',
+  model_version: '模型版本',
+  quality_version: '质量档位',
+  generation_mode: '生成模式',
+  off_peak: '错峰模式',
+  mode: '模式',
+  enhance_prompt: '提示词增强',
+  prompt_extend: '提示词扩展',
+  keep_original_sound: '保留原声',
+  enable_upsample: '超清增强',
+  watermark: '水印',
+  character_orientation: '人物朝向',
+  shot_type: '镜头类型',
+  generation_type: '生成类型',
+  audio_setting: '音频设置',
+  refer_type: '参考方式',
+  lip_sync: '口型同步',
+  sound: '声音',
+  _quan_neng_mode: '全能模式',
+  quality: '质量',
+  ratio: '比例',
+  size: '尺寸',
+};
+
+function serializeVideoDynamicOptionValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return String(value ?? '').trim();
+}
+
+function humanizeVideoAdvancedLabel(key: string): string {
+  const direct = VIDEO_ADVANCED_LABELS[key];
+  if (direct) return direct;
+  return key
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function toVideoDynamicSelectOptions(value: unknown): VideoDynamicSelectOption[] {
+  if (!Array.isArray(value)) return [];
+
+  const options: VideoDynamicSelectOption[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+      const optionValue = serializeVideoDynamicOptionValue(item);
+      if (!optionValue || seen.has(optionValue)) continue;
+      seen.add(optionValue);
+      options.push({
+        value: optionValue,
+        label: optionValue,
+        rawValue: item,
+      });
+      continue;
+    }
+
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const rawValue =
+        'value' in item
+          ? (item as { value?: unknown }).value
+          : 'label' in item
+            ? (item as { label?: unknown }).label
+            : undefined;
+      const optionValue = serializeVideoDynamicOptionValue(rawValue);
+      if (!optionValue || seen.has(optionValue)) continue;
+      seen.add(optionValue);
+      const label = String(
+        ('label' in item ? (item as { label?: unknown }).label : undefined) ?? optionValue
+      ).trim() || optionValue;
+      options.push({
+        value: optionValue,
+        label,
+        rawValue,
+      });
+    }
+  }
+
+  return options;
+}
+
+function localizeVideoDynamicOptions(
+  key: string,
+  options: VideoDynamicSelectOption[]
+): VideoDynamicSelectOption[] {
+  return options.map((option) => ({
+    ...option,
+    label: localizeVideoDynamicOptionLabel(key, option.label, option.rawValue ?? option.value),
+  }));
+}
+
+function getVideoTopLevelOptions(
+  model: VideoModelSummary | undefined,
+  optionKey:
+    | 'version_options'
+    | 'model_version_options'
+    | 'quality_version_options'
+    | 'generation_mode_options'
+): VideoDynamicSelectOption[] {
+  const extra = getVideoModelExtraParams(model);
+  return localizeVideoDynamicOptions(
+    optionKey.replace(/_options$/, ''),
+    toVideoDynamicSelectOptions(extra[optionKey])
+  );
+}
+
+function getVideoTopLevelFieldLabel(
+  model: VideoModelSummary | undefined,
+  key: 'version' | 'model_version' | 'quality_version' | 'generation_mode' | 'off_peak'
+): string {
+  const extra = getVideoModelExtraParams(model);
+  const aliasMap: Record<string, string | undefined> = {
+    generation_mode: typeof extra.generation_mode_param_name === 'string' ? extra.generation_mode_param_name : undefined,
+    model_version: typeof extra.model_version_param_name === 'string' ? extra.model_version_param_name : undefined,
+    quality_version: typeof extra.quality_version_param_name === 'string' ? extra.quality_version_param_name : undefined,
+    version: typeof extra.version_param_name === 'string' ? extra.version_param_name : undefined,
+  };
+
+  if (key === 'off_peak') return '错峰模式';
+  const actualKey = aliasMap[key] || key;
+  return humanizeVideoAdvancedLabel(actualKey);
+}
+
+
+function getVideoDynamicParamOptions(
+  model?: VideoModelSummary
+): Record<string, VideoDynamicSelectOption[]> {
+  const extra = getVideoModelExtraParams(model);
+  const dynamic = extra.dynamic_param_options;
+  if (!dynamic || typeof dynamic !== 'object' || Array.isArray(dynamic)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(dynamic).map(([key, value]) => [key, localizeVideoDynamicOptions(key, toVideoDynamicSelectOptions(value))])
+  );
+}
+
+function getVideoOffPeakOptions(model?: VideoModelSummary): VideoDynamicSelectOption[] {
+  const dynamicOptions = getVideoDynamicParamOptions(model);
+  const provided = dynamicOptions.off_peak || [];
+  if (provided.length > 0) return provided;
+
+  const hasRuleBasedOffPeak = Array.isArray(model?.pricingRules)
+    && model.pricingRules.some((rule) => typeof rule.offPeak === 'boolean');
+  const hasDefault = typeof model?.videoConfigObject?.off_peak === 'boolean';
+  if (!hasRuleBasedOffPeak && !hasDefault) return [];
+
+  return [
+    { value: 'false', label: '关闭', rawValue: false },
+    { value: 'true', label: '开启', rawValue: true },
+  ];
+}
+
+function getVideoAdvancedSelectFields(model?: VideoModelSummary): VideoAdvancedSelectField[] {
+  if (!model) return [];
+
+  const fields: VideoAdvancedSelectField[] = [];
+  const pushField = (
+    key: string,
+    label: string,
+    options: VideoDynamicSelectOption[],
+    source: 'top-level' | 'extra',
+  ) => {
+    if (options.length <= 1) return;
+    fields.push({ key, label, options, source });
+  };
+
+  pushField('version', getVideoTopLevelFieldLabel(model, 'version'), getVideoTopLevelOptions(model, 'version_options'), 'top-level');
+  pushField('model_version', getVideoTopLevelFieldLabel(model, 'model_version'), getVideoTopLevelOptions(model, 'model_version_options'), 'top-level');
+  pushField('quality_version', getVideoTopLevelFieldLabel(model, 'quality_version'), getVideoTopLevelOptions(model, 'quality_version_options'), 'top-level');
+  pushField('generation_mode', getVideoTopLevelFieldLabel(model, 'generation_mode'), getVideoTopLevelOptions(model, 'generation_mode_options'), 'top-level');
+  pushField('off_peak', getVideoTopLevelFieldLabel(model, 'off_peak'), getVideoOffPeakOptions(model), 'top-level');
+
+  const dynamicOptions = getVideoDynamicParamOptions(model);
+  const reservedKeys = new Set([
+    'duration',
+    'aspect_ratio',
+    'resolution',
+    'quality',
+    'ratio',
+    'size',
+    'mode',
+    'orientation',
+    'model_variant',
+    'version',
+    'model_version',
+    'quality_version',
+    'generation_mode',
+    'off_peak',
+  ]);
+
+  for (const [key, options] of Object.entries(dynamicOptions)) {
+    if (reservedKeys.has(key) || options.length <= 1) continue;
+    pushField(key, humanizeVideoAdvancedLabel(key), options, 'extra');
+  }
+
+  return fields;
+}
+
+function getVideoAdvancedFieldDefaultValue(
+  model: VideoModelSummary | undefined,
+  field: VideoAdvancedSelectField
+): string {
+  if (!model) return field.options[0]?.value || '';
+
+  const baseConfig = model.videoConfigObject || {};
+  const extra = getVideoModelExtraParams(model);
+  const defaultDynamicValues =
+    extra.default_dynamic_param_values
+    && typeof extra.default_dynamic_param_values === 'object'
+    && !Array.isArray(extra.default_dynamic_param_values)
+      ? extra.default_dynamic_param_values as Record<string, unknown>
+      : {};
+
+  const rawValue =
+    field.source === 'top-level'
+      ? (baseConfig as Record<string, unknown>)[field.key]
+      : defaultDynamicValues[field.key] ?? extra[field.key];
+
+  const serialized = serializeVideoDynamicOptionValue(rawValue);
+  if (serialized && field.options.some((option) => option.value === serialized)) {
+    return serialized;
+  }
+
+  return field.options[0]?.value || '';
+}
+
+function resolveVideoAdvancedFieldRawValue(
+  field: VideoAdvancedSelectField,
+  selectedValue: string
+): unknown {
+  const rawValue = field.options.find((option) => option.value === selectedValue)?.rawValue ?? selectedValue;
+  if (field.key === 'off_peak') {
+    if (rawValue === true || rawValue === false) return rawValue;
+    if (String(rawValue).trim().toLowerCase() === 'true') return true;
+    if (String(rawValue).trim().toLowerCase() === 'false') return false;
+  }
+  return rawValue;
+}
+
+function buildVideoBillingNote(model?: VideoModelSummary): string {
+  const extra = getVideoModelExtraParams(model);
+  const note = String(extra.billing_note || '').trim();
+  return note;
+}
+
+function validateVideoReferenceInputs(
+  model: VideoModelSummary | undefined,
+  slots: VideoReferenceSlotConfig[],
+  files: UploadedMedia[],
+  referenceCountValue?: string,
+  selectedDurationValue?: string,
+): string | null {
+  if (!model) return '请先选择一个可用模型';
+
+  const filesBySlot = new Map<VideoUploadSlot, UploadedMedia[]>();
+  for (const file of files) {
+    const key = (file.slot || 'generic') as VideoUploadSlot;
+    if (!filesBySlot.has(key)) filesBySlot.set(key, []);
+    filesBySlot.get(key)!.push(file);
+  }
+
+  for (const slot of slots) {
+    const currentFiles = filesBySlot.get(slot.key) || [];
+    if (slot.required && currentFiles.length === 0) {
+      return `${slot.label}为必填素材，请先上传后再生成`;
+    }
+    if (slot.minFiles && currentFiles.length < slot.minFiles) {
+      return `${slot.label}至少需要上传 ${slot.minFiles} 个文件`;
+    }
+    if (slot.durationRange) {
+      for (const file of currentFiles) {
+        if (!file.durationSeconds) continue;
+        const validationError = buildVideoDurationValidationMessage(
+          slot.label,
+          file.durationSeconds,
+          slot.durationRange,
+        );
+        if (validationError) return validationError;
+      }
+    }
+  }
+
+  const inputMode = getVideoModelInputMode(model);
+  const requiresUpload = doesVideoModelRequireUpload(model);
+  const imageCount = files.filter((file) => file.mimeType.startsWith('image/')).length;
+  const videoCount = files.filter((file) => file.mimeType.startsWith('video/')).length;
+  const audioCount = files.filter((file) => file.mimeType.startsWith('audio/')).length;
+  const requestedDurationSeconds = parseDurationSeconds(
+    selectedDurationValue || model.defaultDuration,
+    8,
+  );
+
+  if (
+    (inputMode === 'reference' ||
+      inputMode === 'first_frame' ||
+      inputMode === 'first_last_frame' ||
+      inputMode === 'motion_control') &&
+    requiresUpload &&
+    imageCount === 0
+  ) {
+    return '当前模型至少需要上传 1 张参考图后再生成';
+  }
+
+  if (
+    (inputMode === 'video_reference' ||
+      inputMode === 'video_continue' ||
+      inputMode === 'video_edit') &&
+    requiresUpload &&
+    videoCount === 0
+  ) {
+    return inputMode === 'video_continue'
+      ? '当前模型需要先上传续写视频后再生成'
+      : inputMode === 'video_edit'
+        ? '当前模型需要先上传待编辑视频后再生成'
+        : '当前模型需要先上传参考视频后再生成';
+  }
+
+  if (inputMode === 'video_continue' && requestedDurationSeconds > 0) {
+    const tooLongVideo = files.find((file) => (
+      file.mimeType.startsWith('video/')
+      && Number.isFinite(file.durationSeconds)
+      && Number(file.durationSeconds) >= requestedDurationSeconds
+    ));
+
+    if (tooLongVideo?.durationSeconds) {
+      return `续写视频当前时长为 ${roundMediaDurationSeconds(tooLongVideo.durationSeconds)} 秒，需小于所选生成时长 ${requestedDurationSeconds} 秒`;
+    }
+  }
+
+  if (inputMode === 'motion_control' && requiresUpload && videoCount === 0) {
+    return '当前动作控制模型还需要上传动作参考视频后再生成';
+  }
+
+  if (slots.some((slot) => slot.kind === 'audio' && slot.required) && audioCount === 0) {
+    return '当前模型需要先上传音频素材后再生成';
+  }
+
+  if ((inputMode === 'reference' || inputMode === 'motion_control') && referenceCountValue) {
+    const requiredCount = Number(referenceCountValue);
+    if (
+      Number.isFinite(requiredCount)
+      && requiredCount > 0
+      && imageCount > 0
+      && imageCount < requiredCount
+    ) {
+      return `当前参考图数量设置为 ${requiredCount}，请至少上传 ${requiredCount} 张参考图`;
+    }
+  }
+
+  return null;
+}
+
 function getVideoCapabilityChips(model?: VideoModelSummary): string[] {
   if (!model) return [];
   const chips = new Set<string>();
   const inputMode = getVideoModelInputMode(model);
+  const uploadMeta = Object.values(getVideoUploadParamMeta(model));
   if (inputMode === 'reference') chips.add('支持参考图');
   if (inputMode === 'first_frame') chips.add('支持首帧');
   if (inputMode === 'first_last_frame') {
     chips.add('支持首帧');
     chips.add('支持尾帧');
   }
-  if (inputMode === 'video_reference' || inputMode === 'video_continue' || inputMode === 'video_edit') {
+  if (inputMode === 'video_reference') chips.add('支持参考视频');
+  if (inputMode === 'video_continue') chips.add('支持续写视频');
+  if (inputMode === 'video_edit') chips.add('支持待编辑视频');
+  if (inputMode === 'motion_control') {
+    chips.add('支持动作控制');
     chips.add('支持参考视频');
   }
-  if (inputMode === 'motion_control') chips.add('支持动作控制');
+  if (uploadMeta.some((item) => item.kind === 'audio')) chips.add('支持音频驱动');
   if (model.features?.textToVideo) chips.add('文生视频');
   if (model.features?.imageToVideo) chips.add('图生视频');
-  if (model.features?.videoToVideo) chips.add('视频编辑');
+  if (model.features?.videoToVideo && inputMode === 'text') chips.add('视频输入');
   return Array.from(chips);
 }
 
@@ -839,7 +1551,7 @@ function getVideoModelDisplayScore(model: VideoModelSummary) {
   if (model.highlight) total += 1;
 
   if (raw.includes('文生')) total += 8;
-  if (raw.includes('veo3.1-lite')) total += 7;
+  if (raw.includes('veo3.1')) total += 7;
   if (raw.includes('快乐马-文生视频')) total += 7;
 
   if (raw.includes('参考生') || raw.includes('参考')) total -= 8;
@@ -848,6 +1560,34 @@ function getVideoModelDisplayScore(model: VideoModelSummary) {
   if (raw.includes('编辑')) total -= 7;
 
   return total;
+}
+
+function groupVideoModelsByFamily(models: VideoModelSummary[]): GroupedVideoModelsSection[] {
+  const buckets = new Map<VideoModelFamilyKey, VideoModelSummary[]>();
+
+  for (const model of models) {
+    const familyKey = resolveVideoModelFamily(model);
+    if (!buckets.has(familyKey)) {
+      buckets.set(familyKey, []);
+    }
+    buckets.get(familyKey)!.push(model);
+  }
+
+  return VIDEO_MODEL_FAMILY_ORDER
+    .map((familyKey) => {
+      const familyModels = buckets.get(familyKey) || [];
+      if (familyModels.length === 0) return null;
+
+      const family = VIDEO_MODEL_FAMILY_STYLES[familyKey];
+      return {
+        key: familyKey,
+        label: family.label,
+        subtitle: family.subtitle,
+        accent: family.accent,
+        models: familyModels,
+      } satisfies GroupedVideoModelsSection;
+    })
+    .filter((item): item is GroupedVideoModelsSection => Boolean(item));
 }
 
 function parseDurationSeconds(value?: string, fallback = 8): number {
@@ -860,7 +1600,8 @@ function estimateVideoCost(
   duration: string,
   user?: { membershipLevel?: 'normal' | 'vip' | 'svip'; membershipExpiresAt?: number },
   resolution?: string,
-  aspectRatio?: string
+  aspectRatio?: string,
+  videoConfigObject?: VideoConfigObject
 ): number | null {
   if (!model) return null;
 
@@ -870,7 +1611,7 @@ function estimateVideoCost(
     model,
     duration: seconds,
     aspectRatio,
-    videoConfigObject: {
+    videoConfigObject: videoConfigObject || {
       ...(model.videoConfigObject || {}),
       ...(aspectRatio ? { aspect_ratio: aspectRatio as VideoConfigObject['aspect_ratio'] } : {}),
       ...(resolution ? { resolution: resolution.toUpperCase() } : {}),
@@ -915,7 +1656,7 @@ function FloatingGenerateBar({
   const options = quantityOptions && quantityOptions.length > 0 ? quantityOptions : [quantityValue];
 
   return (
-    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
+    <div className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
       <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-4 sm:gap-6">
@@ -988,7 +1729,18 @@ function filterImageModelsByVariant(variant: ImageVariant, models: SafeImageMode
     ? models.filter((item) => isGptModel(item.name))
     : models.filter((item) => !isGptModel(item.name));
 
-  return filtered.length > 0 ? filtered : models;
+  const base = filtered.length > 0 ? filtered : models;
+
+  if (variant === 'gptimage') {
+    return [...base].sort((left, right) => {
+      const leftPreferred = /官转|official|openai/i.test(`${left.name} ${left.apiModel || ''}`) ? 1 : 0;
+      const rightPreferred = /官转|official|openai/i.test(`${right.name} ${right.apiModel || ''}`) ? 1 : 0;
+      if (leftPreferred !== rightPreferred) return rightPreferred - leftPreferred;
+      return 0;
+    });
+  }
+
+  return base;
 }
 
 function isGptLikeIdentifier(value?: string | null) {
@@ -1030,6 +1782,8 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [busyGenerationId, setBusyGenerationId] = useState<string | null>(null);
   const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
+  const [uploadedImages, setUploadedImages] = useState<UploadedMedia[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -1060,11 +1814,16 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   }, [variant]);
 
   const title = isGpt ? 'GPT2 图像生成' : '大香蕉2 图像生成';
-  const hasConfiguredModel = Boolean(modelId && !isFallbackModelId(modelId));
   const selectedModel = useMemo(
     () => models.find((item) => item.id === modelId) || models[0],
     [modelId, models]
   );
+  const effectiveModelId = selectedModel?.id || modelId;
+  const hasConfiguredModel = Boolean(effectiveModelId && !isFallbackModelId(effectiveModelId));
+  const canUseReferenceImage = Boolean(
+    selectedModel?.features?.imageToImage || selectedModel?.requiresReferenceImage
+  );
+  const supportsMultipleReferenceImages = Boolean(selectedModel?.features?.multipleImages);
   const imageGenerationCount = parseQuantityCount(quantity);
   const imageEstimatedCost = useMemo(() => {
     if (!hasConfiguredModel || !selectedModel) return null;
@@ -1081,6 +1840,10 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
     : '请先选择模型';
   const imageAspectLabel = aspect || selectedModel?.defaultAspectRatio || (isGpt ? '1:1' : '9:16');
   const imageSizeLabel = size || selectedModel?.defaultImageSize || (isGpt ? '1K' : '2K');
+
+  useEffect(() => {
+    setUploadedImages((prev) => (supportsMultipleReferenceImages ? prev : prev.slice(0, 1)));
+  }, [supportsMultipleReferenceImages]);
 
   const loadRecentGenerations = useCallback(async () => {
     try {
@@ -1350,10 +2113,65 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
     }
   }, [clearingFailedTasks, tasks]);
 
+  const handleUploadReferenceImages = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files || []);
+      if (files.length === 0) return;
+
+      if (!canUseReferenceImage) {
+        setError('当前模型暂不支持参考图输入，请切换支持图生图的模型');
+        event.target.value = '';
+        return;
+      }
+
+      setUploadingImages(true);
+      setError('');
+      try {
+        const uploaded = await Promise.all(
+          files.map(async (file) => {
+            const result = await uploadMediaFileToPublicUrl(file);
+            return {
+              name: result.name || file.name,
+              mimeType: result.mimeType || file.type || 'application/octet-stream',
+              data: result.url,
+              size: result.size || file.size,
+            } satisfies UploadedMedia;
+          })
+        );
+
+        setUploadedImages((prev) => {
+          const merged = supportsMultipleReferenceImages ? [...prev, ...uploaded] : uploaded;
+          return supportsMultipleReferenceImages ? merged : merged.slice(0, 1);
+        });
+      } catch (uploadError) {
+        setError(uploadError instanceof Error ? uploadError.message : '上传参考图失败');
+      } finally {
+        event.target.value = '';
+        setUploadingImages(false);
+      }
+    },
+    [canUseReferenceImage, supportsMultipleReferenceImages]
+  );
+
+  const handleRemoveUploadedImage = useCallback((target: UploadedMedia) => {
+    setUploadedImages((prev) => prev.filter((item) => item !== target));
+  }, []);
+
   const handleGenerate = async () => {
-    if (!prompt.trim()) return;
+    if (!prompt.trim() && uploadedImages.length === 0) {
+      setError('请输入提示词或上传参考图');
+      return;
+    }
     if (!hasConfiguredModel) {
       setError('请先选择一个可用模型');
+      return;
+    }
+    if (selectedModel?.requiresReferenceImage && uploadedImages.length === 0) {
+      setError('当前模型需要至少上传 1 张参考图后再生成');
+      return;
+    }
+    if (uploadedImages.length > 0 && !canUseReferenceImage) {
+      setError('当前模型暂不支持参考图输入，请切换支持图生图的模型');
       return;
     }
     setLoading(true);
@@ -1367,10 +2185,11 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              modelId,
+              modelId: effectiveModelId,
               prompt: taskPrompt,
               aspectRatio: aspect || undefined,
               imageSize: size || undefined,
+              referenceImages: uploadedImages.map((item) => item.data),
             }),
           });
           const data = await res.json();
@@ -1380,7 +2199,7 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
             id: data.data.id,
             prompt: taskPrompt,
             model: selectedModel?.name || selectedModel?.apiModel || '图像生成',
-            modelId,
+            modelId: effectiveModelId,
             type: data.data.type || 'gemini-image',
             status: 'pending',
             progress: 0,
@@ -1420,7 +2239,7 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
   };
 
   return (
-    <div className="space-y-4 pb-36">
+    <div className="space-y-4 pb-52 lg:pb-36">
       <LcPageTitle title={title} />
       <section className="overflow-hidden rounded-[26px] border border-white/10 bg-[#10141c]/90 shadow-[0_20px_60px_rgba(0,0,0,0.24)]">
         <ResultGallery
@@ -1435,7 +2254,48 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
       </section>
       <LcCard>
         <div className="space-y-5 p-5">
-          <LcUploadBox label="上传图片" sublabel="单张建议不要超过 15MB" />
+          <LcUploadBox
+            label={supportsMultipleReferenceImages ? '上传参考图（支持多张）' : '上传参考图'}
+            sublabel={
+              canUseReferenceImage
+                ? '上传后会自动转为公网 URL，并在本站服务器保留 24 小时'
+                : '当前模型以文生图为主，可切换支持图生图的模型'
+            }
+            accept="image/*"
+            multiple={supportsMultipleReferenceImages}
+            onChange={handleUploadReferenceImages}
+          />
+          {uploadingImages ? (
+            <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+              正在上传参考图并转换为服务器公网 URL...
+            </div>
+          ) : null}
+          {uploadedImages.length > 0 ? (
+            <div className="rounded-[22px] border border-white/8 bg-[#0f1319] p-3">
+              <div className="mb-2 text-xs text-white/45">已上传参考图</div>
+              <div className="flex flex-wrap gap-2">
+                {uploadedImages.map((file, index) => (
+                  <span
+                    key={`${file.name}-${index}`}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[11px] text-white/72"
+                  >
+                    {file.name}
+                    <span className="rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] text-emerald-300">公网URL</span>
+                    <button
+                      type="button"
+                      className="text-white/40 transition hover:text-white"
+                      onClick={() => handleRemoveUploadedImage(file)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100/85">
+            生成结果与上传参考图会优先缓存到本站服务器，默认保留 24 小时，过期后自动删除；如需长期保存，请及时下载。
+          </div>
           <LcTextarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="请输入要生成或编辑的图像描述" />
           <div className="grid gap-4 md:grid-cols-2">
             <LcSection title="模型版本" subtitle="点击卡片切换模型">
@@ -1484,7 +2344,7 @@ export function ImageToolPage({ variant }: { variant: ImageVariant }) {
         costLabel={imageCostLabel}
         buttonLabel="开始生成"
         loading={loading}
-        disabled={!prompt.trim() || !hasConfiguredModel}
+        disabled={!hasConfiguredModel || loading || uploadingImages}
         onClick={handleGenerate}
         quantityValue={quantity}
         quantityOptions={['1条', '2条', '3条', '4条']}
@@ -1507,19 +2367,21 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
   const [resolution, setResolution] = useState('');
   const [referenceCount, setReferenceCount] = useState('1');
   const [motionPreset, setMotionPreset] = useState<'fun' | 'normal' | 'spicy'>('normal');
+  const [advancedSelectValues, setAdvancedSelectValues] = useState<Record<string, string>>({});
   const [quantity, setQuantity] = useState('1 条');
   const [uploadedFiles, setUploadedFiles] = useState<UploadedMedia[]>([]);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const [models, setModels] = useState<VideoModelSummary[]>([]);
-  const [showAllModels, setShowAllModels] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [generations, setGenerations] = useState<Generation[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const hasConfiguredModel = Boolean(modelId && !isFallbackModelId(modelId));
   const currentModel = useMemo(
     () => models.find((item) => item.id === modelId) || models[0],
     [models, modelId]
   );
+  const effectiveModelId = currentModel?.id || modelId;
+  const hasConfiguredModel = Boolean(effectiveModelId && !isFallbackModelId(effectiveModelId));
   const aspectOptions = useMemo(
     () => getVideoAspectOptions(currentModel),
     [currentModel]
@@ -1534,6 +2396,10 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
   );
   const referenceCountOptions = useMemo(
     () => getVideoReferenceCountOptions(currentModel),
+    [currentModel]
+  );
+  const advancedSelectFields = useMemo(
+    () => getVideoAdvancedSelectFields(currentModel),
     [currentModel]
   );
   const referenceSlots = useMemo(
@@ -1559,15 +2425,61 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
       || aspectOptions[0],
     [aspect, aspectOptions, currentModel]
   );
+  const currentVideoConfigObject = useMemo(() => {
+    const baseVideoConfig = (currentModel?.videoConfigObject || {}) as VideoConfigObject;
+    const mergedExtraParams = {
+      ...(baseVideoConfig.extra_params && typeof baseVideoConfig.extra_params === 'object'
+        ? baseVideoConfig.extra_params
+        : {}),
+    } as Record<string, unknown>;
+    if (shouldAttachReferenceCount(currentModel)) {
+      mergedExtraParams.reference_image_count = Number(referenceCount || '1');
+    } else {
+      delete mergedExtraParams.reference_image_count;
+    }
+
+    const nextConfig: VideoConfigObject = {
+      ...baseVideoConfig,
+      aspect_ratio: toVideoConfigAspectRatio(selectedAspect),
+      video_length: parseDurationSeconds(duration || currentModel?.defaultDuration || '8s', 8),
+      ...(resolution ? { resolution: resolution.toUpperCase() } : {}),
+      preset: motionPreset,
+      extra_params: mergedExtraParams,
+    };
+
+    for (const field of advancedSelectFields) {
+      const selectedValue = advancedSelectValues[field.key];
+      if (!selectedValue) continue;
+      const rawValue = resolveVideoAdvancedFieldRawValue(field, selectedValue);
+      if (field.source === 'top-level') {
+        (nextConfig as Record<string, unknown>)[field.key] = rawValue;
+      } else {
+        mergedExtraParams[field.key] = rawValue;
+      }
+    }
+
+    nextConfig.extra_params = mergedExtraParams;
+    return nextConfig;
+  }, [
+    advancedSelectFields,
+    advancedSelectValues,
+    currentModel,
+    duration,
+    motionPreset,
+    referenceCount,
+    resolution,
+    selectedAspect,
+  ]);
   const estimatedCost = useMemo(
     () => estimateVideoCost(
       currentModel,
       duration,
       session?.user,
       resolution || getDefaultResolution(currentModel),
-      selectedAspect?.value || currentModel?.defaultAspectRatio
+      selectedAspect?.value || currentModel?.defaultAspectRatio,
+      currentVideoConfigObject
     ),
-    [currentModel, duration, resolution, selectedAspect?.value, session?.user]
+    [currentModel, currentVideoConfigObject, duration, resolution, selectedAspect?.value, session?.user]
   );
   const costLabel = hasConfiguredModel
     ? `${estimatedCost ?? currentModel?.durations?.[0]?.cost ?? 0} 积分`
@@ -1581,11 +2493,14 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     }),
     [models]
   );
-  const visibleModels = useMemo(
-    () => (showAllModels ? sortedModels : sortedModels.slice(0, 9)),
-    [showAllModels, sortedModels]
+  const groupedVideoModels = useMemo(
+    () => groupVideoModelsByFamily(sortedModels),
+    [sortedModels]
   );
-  const hiddenCount = Math.max(0, sortedModels.length - visibleModels.length);
+  const billingNote = useMemo(
+    () => buildVideoBillingNote(currentModel),
+    [currentModel]
+  );
   const hasInput = Boolean(prompt.trim() || uploadedFiles.length > 0);
   const groupedUploads = useMemo(
     () =>
@@ -1618,7 +2533,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
             highlight: Boolean(item.highlight),
             enabled: Boolean(item.enabled),
             features: item.features,
-            aspectRatios: item.aspectRatios || [],
+            aspectRatios: normalizeIncomingVideoAspectRatios(item.aspectRatios || []),
             defaultAspectRatio: item.defaultAspectRatio || 'landscape',
             billingMode: item.billingMode,
             billingPrice: item.billingPrice,
@@ -1627,26 +2542,16 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
             vipPrice: item.vipPrice,
             svipPrice: item.svipPrice,
             pricingRules: item.pricingRules,
-            durations: item.durations || [],
+            durations: normalizeIncomingVideoDurations(item.durations || []),
             defaultDuration: item.defaultDuration || '8s',
             imageUrl: item.imageUrl,
             videoConfigObject: item.videoConfigObject,
           }))
         );
-        console.log('[VideoToolPage] models loaded', {
-          variant,
-          count: next.length,
-          first: next[0]?.name,
-        });
         setModels(next);
         const preferred = pickPreferredVideoModel(next);
         setModelId((current) => (current && next.some((item) => item.id === current) && !isFallbackModelId(current) ? current : preferred?.id || next[0]?.id || ''));
       } catch {
-        console.log('[VideoToolPage] fallback models', {
-          variant,
-          count: fallbackModels.length,
-          first: fallbackModels[0]?.name,
-        });
         setModels(fallbackModels);
         const preferred = pickPreferredVideoModel(fallbackModels);
         setModelId((current) => (current && fallbackModels.some((item) => item.id === current) ? current : preferred?.id || fallbackModels[0]?.id || ''));
@@ -1654,6 +2559,19 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     };
     void load();
   }, [variant]);
+
+  useEffect(() => {
+    if (!modelId && models.length > 0) {
+      const preferred = pickPreferredVideoModel(models);
+      setModelId(preferred?.id || models[0].id);
+    }
+  }, [modelId, models]);
+
+  useEffect(() => {
+    if (!modelId && models.length > 0) {
+      setModelId(models[0].id);
+    }
+  }, [modelId, models]);
 
   useEffect(() => {
     if (!currentModel) return;
@@ -1691,7 +2609,15 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
       }
       return 'normal';
     });
-  }, [aspectOptions, currentModel, durationOptions, referenceCountOptions, resolutionOptions]);
+    setAdvancedSelectValues(() =>
+      Object.fromEntries(
+        advancedSelectFields.map((field) => [
+          field.key,
+          getVideoAdvancedFieldDefaultValue(currentModel, field),
+        ])
+      )
+    );
+  }, [advancedSelectFields, aspectOptions, currentModel, durationOptions, referenceCountOptions, resolutionOptions]);
 
   useEffect(() => {
     const allowedSlots = new Map(referenceSlots.map((slot) => [slot.key, slot]));
@@ -1724,12 +2650,6 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     }
   }, [variant]);
 
-  useEffect(() => {
-    if (variant === 'sora2' && !modelId && models.length > 0) {
-      setModelId(models[0].id);
-    }
-  }, [models, modelId, variant]);
-
   const loadRecentGenerations = useCallback(async () => {
     try {
       const recent = await fetchRecentUserGenerations(24);
@@ -1760,16 +2680,6 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
               persisted: true,
             }) satisfies Task
         );
-
-      console.log('[VideoToolPage] generations synced', {
-        variant,
-        total: recent.length,
-        video: videoGenerations.length,
-        completed: completedVideoGenerations.length,
-        active: activeVideoTasks.length,
-        failed: failedVideoTasks.length,
-      });
-
       setGenerations((prev) => mergeGenerationsById(prev, completedVideoGenerations));
       if (activeVideoTasks.length > 0) {
         setTasks((prev) => mergeTasksById(prev, activeVideoTasks));
@@ -1977,34 +2887,40 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
         }
 
         const effectiveFiles = slotConfig?.maxFiles ? fileList.slice(0, remaining) : fileList;
+        setUploadingMedia(true);
+        setError('');
         try {
           const next = await Promise.all(
-            effectiveFiles.map(
-              (file) =>
-                new Promise<UploadedMedia>((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    const result = typeof reader.result === 'string' ? reader.result : '';
-                    if (!result) {
-                      reject(new Error(`读取文件失败: ${file.name}`));
-                      return;
-                    }
-                    resolve({
-                      name: file.name,
-                      mimeType: file.type || 'application/octet-stream',
-                      data: result,
-                      slot,
-                    });
-                  };
-                  reader.onerror = () => reject(new Error(`读取文件失败: ${file.name}`));
-                  reader.readAsDataURL(file);
-                })
-            )
+            effectiveFiles.map(async (file) => {
+              const durationSeconds = await readBrowserMediaDurationSeconds(file);
+              if (slotConfig?.durationRange && durationSeconds) {
+                const validationError = buildVideoDurationValidationMessage(
+                  slotConfig.label,
+                  durationSeconds,
+                  slotConfig.durationRange,
+                );
+                if (validationError) {
+                  throw new Error(validationError);
+                }
+              }
+
+              const uploaded = await uploadMediaFileToPublicUrl(file);
+              return {
+                name: uploaded.name || file.name,
+                mimeType: uploaded.mimeType || file.type || 'application/octet-stream',
+                data: uploaded.url,
+                size: uploaded.size || file.size,
+                durationSeconds: durationSeconds || undefined,
+                slot,
+              } satisfies UploadedMedia;
+            })
           );
           setUploadedFiles((prev) => [...prev, ...next]);
           event.target.value = '';
         } catch (uploadError) {
-          setError(uploadError instanceof Error ? uploadError.message : '读取上传文件失败');
+          setError(uploadError instanceof Error ? uploadError.message : '上传素材失败');
+        } finally {
+          setUploadingMedia(false);
         }
       },
     [referenceSlots, uploadedFiles]
@@ -2018,35 +2934,22 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     async (taskPrompt: string) => {
       const effectiveDuration = duration || currentModel?.defaultDuration || '8s';
       const aspectRatio = selectedAspect?.value || currentModel?.defaultAspectRatio || 'landscape';
-      const baseVideoConfig = (currentModel?.videoConfigObject || {}) as VideoConfigObject;
-      const mergedExtraParams = {
-        ...(baseVideoConfig.extra_params && typeof baseVideoConfig.extra_params === 'object'
-          ? baseVideoConfig.extra_params
-          : {}),
-        reference_image_count: Number(referenceCount || '1'),
-      };
-      const videoConfigObject: VideoConfigObject = {
-        ...baseVideoConfig,
-        aspect_ratio: toVideoConfigAspectRatio(selectedAspect),
-        video_length: parseDurationSeconds(effectiveDuration, 8),
-        ...(resolution ? { resolution: resolution.toUpperCase() } : {}),
-        preset: motionPreset,
-        extra_params: mergedExtraParams,
-      };
 
       const res = await fetchGenerationSubmit('/api/generate/sora', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: currentModel?.name || currentModel?.apiModel || '视频生成',
-          modelId,
+          modelId: effectiveModelId,
           aspectRatio,
           duration: effectiveDuration,
           prompt: taskPrompt,
-          videoConfigObject,
+          videoConfigObject: currentVideoConfigObject,
           files: sortUploadedFilesForSubmit(uploadedFiles).map((file) => ({
             mimeType: file.mimeType,
             data: file.data,
+            slot: file.slot,
+            durationSeconds: file.durationSeconds,
           })),
         }),
       });
@@ -2060,7 +2963,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
         id: data.data.id,
         prompt: taskPrompt,
         model: currentModel?.name || currentModel?.apiModel || '视频生成',
-        modelId,
+        modelId: effectiveModelId,
         type: 'sora-video',
         status: 'pending',
         progress: 0,
@@ -2072,16 +2975,29 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
       void pollTaskStatus(data.data.id, taskPrompt);
       return data.data.id as string;
     },
-    [currentModel, duration, modelId, motionPreset, pollTaskStatus, referenceCount, resolution, selectedAspect, uploadedFiles]
+    [currentModel, currentVideoConfigObject, duration, effectiveModelId, pollTaskStatus, selectedAspect, uploadedFiles]
   );
 
   const handleGenerate = async () => {
-    if (!hasInput) {
-      setError('请输入提示词或上传参考素材');
-      return;
-    }
     if (!hasConfiguredModel) {
       setError('请先选择一个可用模型');
+      return;
+    }
+
+    const referenceError = validateVideoReferenceInputs(
+      currentModel,
+      referenceSlots,
+      uploadedFiles,
+      referenceCount,
+      duration || currentModel?.defaultDuration,
+    );
+    if (referenceError) {
+      setError(referenceError);
+      return;
+    }
+
+    if (!hasInput) {
+      setError('请输入提示词或上传参考素材');
       return;
     }
 
@@ -2133,6 +3049,15 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
     [tasks, videoModelMap]
   );
   const currentModelMeta = currentModel ? buildVideoModelCardMeta(currentModel) : null;
+  const currentBillingText = currentModel
+    ? (
+        getVideoPricingPreviewLabel(
+          currentModel,
+          duration || currentModel.defaultDuration,
+          currentVideoConfigObject
+        ) || currentModelMeta?.billingText || ''
+      )
+    : '';
   const selectedDurationOption =
     durationOptions.find((item) => item.value === duration)
     || durationOptions.find((item) => item.value === currentModel?.defaultDuration)
@@ -2141,7 +3066,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
   const generationCount = parseQuantityCount(quantity);
 
   return (
-    <div className="space-y-8 pb-36">
+    <div className="space-y-8 pb-52 lg:pb-36">
       <div className="space-y-4">
         <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/15 bg-emerald-400/[0.08] px-4 py-2 text-xs text-emerald-200/90 backdrop-blur-xl">
           <Sparkles className="h-3.5 w-3.5" />
@@ -2180,83 +3105,114 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
         <div className="flex flex-col gap-3 border-b border-white/8 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <div>
             <div className="text-lg font-semibold text-white">选择视频模型</div>
-            <div className="mt-1 text-xs text-white/45">点击模型卡片切换引擎，支持按次 / 按秒计费</div>
+            <div className="mt-1 text-xs text-white/45">所有可用模型已全部展示，并按家族分组；点击卡片即可切换引擎，支持按次 / 按秒计费</div>
           </div>
-          {hiddenCount > 0 ? (
-            <button
-              type="button"
-              onClick={() => setShowAllModels((value) => !value)}
-              className="inline-flex items-center gap-2 self-start rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs text-white/75 transition hover:bg-white/[0.08]"
-            >
-              <span>{showAllModels ? '收起模型' : '查看更多模型'}</span>
-              <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-white/60">
-                {showAllModels ? models.length : hiddenCount}
-              </span>
-            </button>
-          ) : null}
+          <div className="flex flex-wrap gap-2 text-[11px] text-white/55">
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+              共 {sortedModels.length} 个公开视频模型
+            </span>
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+              共 {groupedVideoModels.length} 个模型家族
+            </span>
+          </div>
         </div>
 
-        <div className="grid gap-4 p-4 sm:p-6 md:grid-cols-2 xl:grid-cols-3">
-          {visibleModels.map((model) => {
-            const meta = buildVideoModelCardMeta(model);
-            const active = model.id === modelId;
-            return (
-              <button
-                key={model.id}
-                type="button"
-                onClick={() => setModelId(model.id)}
-                className={cn(
-                  'group overflow-hidden rounded-[28px] border text-left transition-all',
-                  active
-                    ? 'border-emerald-400/55 bg-emerald-400/[0.08] shadow-[0_0_0_1px_rgba(52,211,153,0.12),0_26px_60px_rgba(16,185,129,0.10)]'
-                    : 'border-white/10 bg-white/[0.03] hover:border-white/18 hover:bg-white/[0.05]'
-                )}
-              >
-                <div className="relative aspect-[21/10] overflow-hidden">
-                  <img
-                    src={meta.imageUrl}
-                    alt={model.name}
-                    className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-                    loading="lazy"
-                  />
-                  <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_15%,rgba(6,10,16,0.9)_100%)]" />
-                  <div className="absolute left-3 top-3 inline-flex rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[11px] font-medium text-white/88 backdrop-blur-md">
-                    {meta.familyLabel}
-                  </div>
-                  <div className="absolute right-3 top-3 rounded-full border border-white/15 bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-md">
-                    {meta.badge}
-                  </div>
-                  {active ? (
-                    <div className="absolute bottom-3 right-3 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-400 text-[#052616] shadow-lg shadow-emerald-500/25">
-                      <Check className="h-4 w-4" />
-                    </div>
-                  ) : null}
-                  <div className="absolute inset-x-4 bottom-4">
-                    <div className="truncate text-[19px] font-semibold text-white">{model.name}</div>
-                    <div className="mt-1 truncate text-[11px] text-white/58">
-                      {model.description || meta.billingText}
-                    </div>
-                  </div>
-                </div>
+        <div className="space-y-6 p-4 sm:p-6">
+          {groupedVideoModels.length === 0 ? (
+            <div className="rounded-[28px] border border-dashed border-white/10 bg-white/[0.02] px-5 py-8 text-center text-sm text-white/45">
+              {models.length === 0 ? '视频模型加载中，请稍候…' : '当前没有可用的视频模型'}
+            </div>
+          ) : null}
 
-                <div className="space-y-3 px-4 py-4">
-                  <div className="flex flex-wrap gap-2 text-[11px]">
-                    <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-white/68">
-                      {getVideoModelKindLabel(model)}
-                    </span>
-                    <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-emerald-300">
-                      {meta.billingText}
-                    </span>
-                    {model.defaultAspectRatio ? (
-                      <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-white/52">
-                        默认 {getVideoAspectOptions(model).find((item) => item.value === model.defaultAspectRatio)?.label || model.defaultAspectRatio}
-                      </span>
-                    ) : null}
+          {groupedVideoModels.map((group) => (
+            <div key={group.key} className="space-y-4">
+              <div className="flex flex-col gap-2 rounded-[24px] border border-white/8 bg-white/[0.025] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: group.accent }}
+                    />
+                    <div className="text-base font-semibold text-white">{group.label}</div>
+                  </div>
+                  <div className="mt-1 text-xs text-white/42">
+                    {group.subtitle} · {group.models.length} 个模型
                   </div>
                 </div>
-              </button>
-            );
-          })}
+                <div className="flex flex-wrap gap-2 text-[11px] text-white/55">
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {group.models.filter((item) => item.features?.textToVideo).length} 个支持文生
+                  </span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">
+                    {group.models.filter((item) => item.features?.imageToVideo).length} 个支持图生
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {group.models.map((model) => {
+                  const meta = buildVideoModelCardMeta(model);
+                  const active = model.id === modelId;
+                  return (
+                    <button
+                      key={model.id}
+                      type="button"
+                      onClick={() => setModelId(model.id)}
+                      className={cn(
+                        'group overflow-hidden rounded-[28px] border text-left transition-all',
+                        active
+                          ? 'border-emerald-400/55 bg-emerald-400/[0.08] shadow-[0_0_0_1px_rgba(52,211,153,0.12),0_26px_60px_rgba(16,185,129,0.10)]'
+                          : 'border-white/10 bg-white/[0.03] hover:border-white/18 hover:bg-white/[0.05]'
+                      )}
+                    >
+                      <div className="relative aspect-[21/10] overflow-hidden">
+                        <img
+                          src={meta.imageUrl}
+                          alt={model.name}
+                          className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                          loading="lazy"
+                        />
+                        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.04)_15%,rgba(6,10,16,0.9)_100%)]" />
+                        <div className="absolute left-3 top-3 inline-flex rounded-full border border-white/15 bg-black/25 px-2.5 py-1 text-[11px] font-medium text-white/88 backdrop-blur-md">
+                          {meta.familyLabel}
+                        </div>
+                        <div className="absolute right-3 top-3 rounded-full border border-white/15 bg-white/15 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-md">
+                          {meta.badge}
+                        </div>
+                        {active ? (
+                          <div className="absolute bottom-3 right-3 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-400 text-[#052616] shadow-lg shadow-emerald-500/25">
+                            <Check className="h-4 w-4" />
+                          </div>
+                        ) : null}
+                        <div className="absolute inset-x-4 bottom-4">
+                          <div className="truncate text-[19px] font-semibold text-white">{model.name}</div>
+                          <div className="mt-1 truncate text-[11px] text-white/58">
+                            {getVideoModelDisplayDescription(model) || model.description || meta.billingText}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 px-4 py-4">
+                        <div className="flex flex-wrap gap-2 text-[11px]">
+                          <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-white/68">
+                            {getVideoModelKindLabel(model)}
+                          </span>
+                          <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-emerald-300">
+                            {meta.billingText}
+                          </span>
+                          {model.defaultAspectRatio ? (
+                            <span className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-white/52">
+                              默认 {getVideoAspectOptions(model).find((item) => item.value === model.defaultAspectRatio)?.label || model.defaultAspectRatio}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -2285,7 +3241,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
               引擎就绪
             </span>
             <span>当前模型：{currentModel?.name || '未选择'}</span>
-            {currentModelMeta?.billingText ? <span>计费：{currentModelMeta.billingText}</span> : null}
+            {currentBillingText ? <span>计费：{currentBillingText}</span> : null}
           </div>
 
           {error ? (
@@ -2293,6 +3249,14 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
               {error}
             </div>
           ) : null}
+          {uploadingMedia ? (
+            <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
+              正在上传素材并转换为服务器公网 URL...
+            </div>
+          ) : null}
+          <div className="mt-4 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100/85">
+            生成结果会优先缓存到本站服务器，默认保留 24 小时，过期后自动删除；如需长期保存，请及时下载。
+          </div>
         </div>
 
         <div className="overflow-hidden rounded-[32px] border border-white/10 bg-[#0d131c]/84 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.28)] backdrop-blur-2xl sm:p-6">
@@ -2302,70 +3266,87 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
           </div>
 
           <div className="grid gap-3">
-            {groupedUploads.map(({ slot, files }) => {
-              const isVideoSlot = slot.accept.includes('video');
-              return (
-                <label
-                  key={slot.key}
-                  className="cursor-pointer rounded-[26px] border border-dashed border-white/10 bg-[#121922] p-4 transition hover:border-emerald-400/30 hover:bg-white/[0.03]"
-                >
-                  <input
-                    type="file"
-                    className="hidden"
-                    accept={slot.accept}
-                    multiple={slot.multiple}
-                    onChange={handleUploadFiles(slot.key)}
-                  />
+            {groupedUploads.length > 0 ? (
+              groupedUploads.map(({ slot, files }) => {
+                const isVideoSlot = slot.kind === 'video';
+                const isAudioSlot = slot.kind === 'audio';
+                return (
+                  <label
+                    key={slot.key}
+                    className="cursor-pointer rounded-[26px] border border-dashed border-white/10 bg-[#121922] p-4 transition hover:border-emerald-400/30 hover:bg-white/[0.03]"
+                  >
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept={slot.accept}
+                      multiple={slot.multiple}
+                      onChange={handleUploadFiles(slot.key)}
+                    />
 
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/[0.04] text-white/55">
-                      {isVideoSlot ? <Video className="h-5 w-5" /> : <ImagePlus className="h-5 w-5" />}
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold text-white">{slot.label}</p>
-                        <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-white/40">
-                          {slot.maxFiles && slot.maxFiles > 1
-                            ? `最多 ${slot.maxFiles} 个`
-                            : slot.multiple ? '多文件' : '单文件'}
-                        </span>
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/[0.04] text-white/55">
+                        {isVideoSlot ? (
+                          <Video className="h-5 w-5" />
+                        ) : isAudioSlot ? (
+                          <Volume2 className="h-5 w-5" />
+                        ) : (
+                          <ImagePlus className="h-5 w-5" />
+                        )}
                       </div>
-                      <p className="mt-1 text-xs leading-5 text-white/40">{slot.hint}</p>
 
-                      {files.length > 0 ? (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {files.map((file, index) => (
-                            <span
-                              key={`${file.name}-${index}`}
-                              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[11px] text-white/72"
-                            >
-                              {file.name}
-                              <button
-                                type="button"
-                                className="text-white/40 transition hover:text-white"
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  handleRemoveUploadedFile(file);
-                                }}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-white">{slot.label}</p>
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-white/40">
+                            {slot.required ? '必填 · ' : ''}
+                            {slot.maxFiles && slot.maxFiles > 1
+                              ? `最多 ${slot.maxFiles} 个`
+                              : slot.multiple ? '多文件' : '单文件'}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs leading-5 text-white/40">{slot.hint}</p>
+
+                        {files.length > 0 ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {files.map((file, index) => (
+                              <span
+                                key={`${file.name}-${index}`}
+                                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[11px] text-white/72"
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-[11px] text-white/45">
-                          <UploadCloud className="h-3.5 w-3.5" />
-                          点击上传素材
-                        </div>
-                      )}
+                                {file.name}
+                                {file.data.startsWith('http') ? (
+                                  <span className="rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] text-emerald-300">公网URL</span>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="text-white/40 transition hover:text-white"
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handleRemoveUploadedFile(file);
+                                  }}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-[11px] text-white/45">
+                            <UploadCloud className="h-3.5 w-3.5" />
+                            点击上传素材
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </label>
-              );
-            })}
+                  </label>
+                );
+              })
+            ) : (
+              <div className="rounded-[26px] border border-white/10 bg-[#121922] px-4 py-5 text-sm text-white/55">
+                当前模型为纯文本生成，无需上传参考素材；如需参考图/参考视频，请切换到支持图生或视频参考的模型。
+              </div>
+            )}
           </div>
 
           <div className="mt-4 rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-xs leading-6 text-white/42">
@@ -2388,6 +3369,14 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
               setResolution(getDefaultResolution(currentModel));
               setReferenceCount(getDefaultReferenceCount(currentModel));
               setMotionPreset('normal');
+              setAdvancedSelectValues(
+                Object.fromEntries(
+                  advancedSelectFields.map((field) => [
+                    field.key,
+                    getVideoAdvancedFieldDefaultValue(currentModel, field),
+                  ])
+                )
+              );
             }}
             className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs text-white/70 transition hover:bg-white/[0.07]"
           >
@@ -2475,7 +3464,7 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
               })}
             </div>
 
-            {referenceCountOptions.length > 1 ? (
+            {shouldAttachReferenceCount(currentModel) && referenceCountOptions.length > 1 ? (
               <div className="mt-4">
                 <div className="mb-2 text-[11px] text-white/35">参考图数量</div>
                 <LcSelect value={referenceCount} onChange={(e) => setReferenceCount(e.target.value)}>
@@ -2493,9 +3482,48 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
             )}
           </div>
         </div>
+
+        {advancedSelectFields.length > 0 ? (
+          <div className="mt-5 grid gap-5 lg:grid-cols-4">
+            {advancedSelectFields.map((field) => (
+              <div
+                key={field.key}
+                className="rounded-[26px] border border-white/8 bg-[#121922] p-4"
+              >
+                <div className="mb-4 text-[11px] font-semibold uppercase tracking-[0.22em] text-white/32">
+                  {field.label}
+                </div>
+                <LcSelect
+                  value={advancedSelectValues[field.key] || ''}
+                  onChange={(event) =>
+                    setAdvancedSelectValues((prev) => ({
+                      ...prev,
+                      [field.key]: event.target.value,
+                    }))
+                  }
+                >
+                  {field.options.map((option) => (
+                    <option key={`${field.key}-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </LcSelect>
+                <div className="mt-3 text-[11px] text-white/35">
+                  当前：{field.options.find((option) => option.value === advancedSelectValues[field.key])?.label || '未设置'}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {billingNote ? (
+          <div className="mt-5 rounded-[24px] border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100/85">
+            {billingNote}
+          </div>
+        ) : null}
       </section>
 
-      <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
+      <div className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100%-1.5rem)] max-w-[980px] -translate-x-1/2 lg:bottom-6 lg:left-[calc(50%+8rem)] lg:w-[calc(100%-18rem)]">
         <div className="rounded-full border border-emerald-400/15 bg-[#0b1017]/92 px-4 py-3 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-2xl sm:px-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-4 sm:gap-6">
@@ -2534,12 +3562,12 @@ export function VideoToolPage({ variant }: { variant: VideoVariant }) {
 
             <button
               type="button"
-              disabled={!hasInput || !hasConfiguredModel || loading}
+              disabled={!hasConfiguredModel || loading || uploadingMedia}
               onClick={handleGenerate}
               className="inline-flex h-14 items-center justify-center gap-2 rounded-full bg-emerald-400 px-8 text-base font-semibold text-[#062a1b] shadow-[0_16px_40px_rgba(16,185,129,0.35)] transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-55"
             >
-              <Sparkles className={cn('h-4 w-4', loading ? 'animate-spin' : '')} />
-              {loading ? '正在提交任务...' : '开始生成'}
+              <Sparkles className={cn('h-4 w-4', loading || uploadingMedia ? 'animate-spin' : '')} />
+              {uploadingMedia ? '素材上传中...' : loading ? '正在提交任务...' : '开始生成'}
             </button>
           </div>
         </div>
@@ -2731,7 +3759,7 @@ export function TtsPage() {
   }, []);
 
   return (
-    <div className="space-y-4 pb-36">
+    <div className="space-y-4 pb-52 lg:pb-36">
       <LcPageTitle title="TTS语音" description="创建声音、TTS语音克隆、音色替换" />
       <ResultGallery
         generations={generations}
@@ -2777,6 +3805,7 @@ export function TtsPage() {
 }
 
 export function MusicPage() {
+  const { data: session } = useSession();
   const [stylePrompt, setStylePrompt] = useState('');
   const [model, setModel] = useState('海螺 音乐生成 2.5+');
   const [lyrics, setLyrics] = useState('');
@@ -2789,6 +3818,15 @@ export function MusicPage() {
   const [generations, setGenerations] = useState<Generation[]>([]);
   const [busyGenerationId, setBusyGenerationId] = useState<string | null>(null);
   const [clearingFailedTasks, setClearingFailedTasks] = useState(false);
+
+  const musicCost = useMemo(() => calculateBillingCost({
+    billingMode: 'per_call',
+    billingPrice: 10,
+    billingUnit: 1,
+    legacyCost: 10,
+  }), []);
+  const musicCostLabel = useMemo(() => `${musicCost} 积分`, [musicCost]);
+  const musicMetaLabel = useMemo(() => `${duration} · ${customMode ? '自定义歌词' : '自动歌词'} · 1 条`, [duration, customMode]);
 
   useEffect(() => {
     let mounted = true;
@@ -2940,7 +3978,7 @@ export function MusicPage() {
   }, []);
 
   return (
-    <div className="space-y-4 pb-36">
+    <div className="space-y-4 pb-52 lg:pb-36">
       <LcPageTitle title="AI音乐" />
       <LcCard>
         <div className="space-y-5 p-5">
@@ -2966,10 +4004,9 @@ export function MusicPage() {
               className="min-h-[220px]"
             />
           </LcSection>
-          <LcSection title="音乐模型">
+          <LcSection title="音乐模型" subtitle="当前仅保留可直接提交的音乐模型，VIDU-音乐MV 请到视频生成页使用">
             <LcSelect value={model} onChange={(e) => setModel(e.target.value)}>
               <option value="海螺 音乐生成 2.5+">海螺 音乐生成 2.5+</option>
-              <option value="VIDU-音乐MV">VIDU-音乐MV</option>
             </LcSelect>
           </LcSection>
           <LcSection title="音乐时长">
@@ -3006,13 +4043,13 @@ export function MusicPage() {
       />
 
       <FloatingGenerateBar
-        costLabel="10 积分"
+        costLabel={musicCostLabel}
         buttonLabel="开始生成"
         loading={loading}
         disabled={!stylePrompt.trim() && !lyrics.trim()}
         onClick={handleGenerate}
         modelLabel={model}
-        metaLabel={`${duration} · ${customMode ? '自定义歌词' : '自动歌词'} · 1 条`}
+        metaLabel={musicMetaLabel}
       />
     </div>
   );
@@ -3206,7 +4243,7 @@ export function RechargePage() {
     <div className="space-y-4">
       <LcPageTitle title="钱包中心" description="在线支付、兑换码兑换、订单状态追踪" />
       <LcCard><div className="p-5"><button type="button" className="flex h-12 w-full items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.02] px-4 text-sm text-white/75"><Sparkles className="h-4 w-4" />账号设置</button></div></LcCard>
-      <LcCard><div className="p-5"><div className="rounded-[24px] border border-white/8 bg-white/[0.02] p-5"><p className="text-sm text-white/45">说明</p><p className="mt-3 text-sm leading-7 text-white/72">本站为公益站点，仅收取API成本和基本维护费用，只为让粉丝们体验到全球顶尖的内容生成工具，打破隔离一步到位。积分比例1:100 如遇问题请联系微信:yinpinkaifa</p></div></div></LcCard>
+      <LcCard><div className="p-5"><div className="rounded-[24px] border border-white/8 bg-white/[0.02] p-5"><p className="text-sm text-white/45">说明</p><p className="mt-3 text-sm leading-7 text-white/72">当前页面用于积分充值、兑换码兑换与订单状态追踪。积分比例默认为 1:100，支付结果通常会在几秒内回写到余额；如遇异常，请通过站内反馈或联系管理员处理。生成结果默认仅在本站缓存 24 小时，请及时下载保存。</p></div></div></LcCard>
       <LcCard>
         <div className="p-5">
           <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-[#274d38] bg-[#12271c] text-[#8eedb2]"><Sparkles className="h-5 w-5" /></div>

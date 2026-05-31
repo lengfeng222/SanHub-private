@@ -27,7 +27,7 @@ function providerImageByRaw(raw: string): string | undefined {
   if (/claude|opus|sonnet|haiku/.test(raw)) return 'https://cos.lingkeai.vip/claude.svg';
   if (/grok/.test(raw)) return 'https://cos.lingkeai.vip/Grok_bai.svg';
   if (/gemini|veo/.test(raw)) return 'https://cos.lingkeai.vip/gemini.svg';
-  if (/minimax|海螺/.test(raw)) return 'https://cos.lingkeai.vip/minimax.svg';
+  if (/minimax|mimo|海螺/.test(raw)) return 'https://cos.lingkeai.vip/minimax.svg';
   if (/qwen|千问|万相/.test(raw)) return 'https://cos.lingkeai.vip/qwen.svg';
   if (/doubao|豆包|sd 2\.0/.test(raw)) return 'https://cos.lingkeai.vip/doubao.svg';
   if (/vidu/.test(raw)) return 'https://cos.lingkeai.vip/vidu-icon.svg';

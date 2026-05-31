@@ -3,16 +3,296 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { generateWithSora } from '@/lib/sora';
-import { saveGeneration, updateUserBalance, getUserById, updateGeneration, getSystemConfig, refundGenerationBalance } from '@/lib/db';
+import { saveGeneration, updateUserBalance, getUserById, updateGeneration, getSystemConfig, refundGenerationBalance, updateVideoModel } from '@/lib/db';
 import type { Generation, SoraGenerateRequest } from '@/types';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { fetchReferenceImage } from '@/lib/reference-image';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
-import { saveMediaAsync } from '@/lib/media-storage';
-import { getVideoModelWithChannel } from '@/lib/db';
+import { saveMediaAsset } from '@/lib/media-storage';
+import { extractRuntimeMediaFilenameFromUrl } from '@/lib/media-storage';
+import { resolveVideoModelWithChannelSelection } from '@/lib/model-channel-resolver';
 import { getBaseUrlFromRequest } from '@/lib/epay';
 import { resolveVideoGenerationCost } from '@/lib/member-pricing';
+import type { VideoModel } from '@/types';
+import { getMediaKindLabel } from '@/lib/media-kind';
+import { localizeVideoUploadLabel } from '@/lib/video-upload-presenter';
+import { sanitizeLingkeVideoConfigObject } from '@/lib/lingke-video-config';
+import {
+  formatMediaDurationRange,
+  parseMediaDurationRangeFromText,
+  roundMediaDurationSeconds,
+  validateMediaDurationAgainstRange,
+} from '@/lib/media-duration-rules';
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getVideoExtraParams(model?: VideoModel): Record<string, unknown> {
+  const extra = model?.videoConfigObject?.extra_params;
+  if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+    return extra as Record<string, unknown>;
+  }
+  return {};
+}
+
+function getVideoInputMode(model?: VideoModel): string {
+  const extra = getVideoExtraParams(model);
+  const configured = String(extra.upload_mode || extra.input_mode || '').trim().toLowerCase();
+  if (configured) return configured;
+  return 'text';
+}
+
+function getVideoUploadParamMeta(model?: VideoModel): Record<string, {
+  kind?: 'image' | 'video' | 'audio';
+  label?: string;
+  description?: string;
+  minFiles?: number;
+  maxFiles?: number;
+}> {
+  const extra = getVideoExtraParams(model);
+  const meta = extra.upload_param_meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(meta as Record<string, {
+      kind?: 'image' | 'video' | 'audio';
+      label?: string;
+      description?: string;
+      minFiles?: number;
+      maxFiles?: number;
+    }>).map(([key, value]) => [
+      key,
+      {
+        ...value,
+        label: localizeVideoUploadLabel(value?.label || key, key, value?.kind),
+        description: typeof value?.description === 'string' ? value.description : undefined,
+      },
+    ])
+  );
+}
+
+function getRequestFileDurationSeconds(file: NonNullable<SoraGenerateRequest['files']>[number]): number | null {
+  const value = Number(file.durationSeconds);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+function getRequestedVideoDurationSeconds(
+  request: SoraGenerateRequest,
+  model?: VideoModel
+): number {
+  const configured =
+    Number(request.videoConfigObject?.video_length)
+    || Number(request.video_config?.video_length)
+    || Number(String(request.duration || model?.defaultDuration || '').match(/(\d+)/)?.[1] || 0);
+
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return 8;
+  }
+
+  return Math.floor(configured);
+}
+
+function buildDurationValidationError(
+  slotLabel: string,
+  mediaKind: 'image' | 'video' | 'audio' | undefined,
+  durationSeconds: number,
+  description?: string
+): string | null {
+  const range = parseMediaDurationRangeFromText(description);
+  const violation = validateMediaDurationAgainstRange(durationSeconds, range);
+  if (!violation) return null;
+
+  const kindLabel = mediaKind === 'video'
+    ? '视频素材'
+    : mediaKind === 'audio'
+      ? '音频素材'
+      : '素材';
+  const label = String(slotLabel || kindLabel).trim() || kindLabel;
+  const currentDuration = roundMediaDurationSeconds(durationSeconds);
+  const expectedRange = formatMediaDurationRange(violation);
+  return `${label}当前时长为 ${currentDuration} 秒，需满足 ${expectedRange}`;
+}
+
+function getSelectedReferenceCount(request: SoraGenerateRequest, model?: VideoModel): number {
+  const extra = request.videoConfigObject?.extra_params;
+  const selected = Number(
+    (isPlainObject(extra) ? extra.reference_image_count : undefined)
+    ?? getVideoExtraParams(model).default_reference_image_count
+    ?? 0
+  );
+  return Number.isFinite(selected) && selected > 0 ? Math.floor(selected) : 0;
+}
+
+function validateVideoRequestInputs(
+  request: SoraGenerateRequest,
+  model?: VideoModel
+): string | null {
+  const files = Array.isArray(request.files) ? request.files : [];
+  const extra = getVideoExtraParams(model);
+  const inputMode = getVideoInputMode(model);
+  const imageCount = files.filter((file) => file.mimeType.startsWith('image/')).length;
+  const videoCount = files.filter((file) => file.mimeType.startsWith('video/')).length;
+  const audioCount = files.filter((file) => file.mimeType.startsWith('audio/')).length;
+  const filesBySlot = new Map<string, number>();
+
+  for (const file of files) {
+    const slot = String(file.slot || '').trim();
+    if (!slot) continue;
+    filesBySlot.set(slot, (filesBySlot.get(slot) || 0) + 1);
+  }
+
+  const requiredImageSlots = toStringArray(extra.required_image_upload_param_names);
+  const requiredVideoSlots = toStringArray(extra.required_video_upload_param_names);
+  const requiredAudioSlots = toStringArray(extra.required_audio_upload_param_names);
+  const requiresUpload = extra.requires_upload === true;
+  const uploadMeta = getVideoUploadParamMeta(model);
+  const requestedDurationSeconds = getRequestedVideoDurationSeconds(request, model);
+
+  for (const slot of requiredImageSlots) {
+    if ((filesBySlot.get(slot) || 0) === 0 && imageCount === 0) {
+      const slotLabel = String(uploadMeta[slot]?.label || slot).trim();
+      return `当前模型需要先上传${slotLabel}后再生成`;
+    }
+  }
+  for (const slot of requiredVideoSlots) {
+    if ((filesBySlot.get(slot) || 0) === 0 && videoCount === 0) {
+      const slotLabel = String(uploadMeta[slot]?.label || slot).trim();
+      return slot.includes('continue') || slot.includes('clips')
+        ? `当前模型需要先上传${slotLabel || '续写视频'}后再生成`
+        : `当前模型需要先上传${slotLabel || '参考视频'}后再生成`;
+    }
+  }
+  for (const slot of requiredAudioSlots) {
+    if ((filesBySlot.get(slot) || 0) === 0 && audioCount === 0) {
+      const slotLabel = String(uploadMeta[slot]?.label || slot).trim();
+      return `当前模型需要先上传${slotLabel || '音频素材'}后再生成`;
+    }
+  }
+
+  for (const [slot, meta] of Object.entries(uploadMeta)) {
+    const minFiles = Number(meta?.minFiles || 0);
+    if (!Number.isFinite(minFiles) || minFiles <= 0) continue;
+    const currentCount = filesBySlot.get(slot) || 0;
+    const fallbackCount =
+      meta?.kind === 'video'
+        ? videoCount
+        : meta?.kind === 'audio'
+          ? audioCount
+          : imageCount;
+    const effectiveCount = currentCount > 0 ? currentCount : fallbackCount;
+    if (effectiveCount >= minFiles) continue;
+
+    const slotLabel = String(meta?.label || slot).trim();
+    return `${slotLabel}至少需要上传 ${minFiles} 个文件`;
+  }
+
+  for (const [slot, meta] of Object.entries(uploadMeta)) {
+    const slotFiles = files.filter((file) => String(file.slot || '').trim() === slot);
+    const fallbackFiles = slotFiles.length > 0
+      ? slotFiles
+      : files.filter((file) => (
+        meta?.kind === 'video'
+          ? file.mimeType.startsWith('video/')
+          : meta?.kind === 'audio'
+            ? file.mimeType.startsWith('audio/')
+            : file.mimeType.startsWith('image/')
+      ));
+
+    for (const file of fallbackFiles) {
+      const durationSeconds = getRequestFileDurationSeconds(file);
+      if (!durationSeconds) continue;
+
+      const slotLabel = String(meta?.label || slot).trim();
+      const validationError = buildDurationValidationError(
+        slotLabel,
+        meta?.kind,
+        durationSeconds,
+        meta?.description,
+      );
+      if (validationError) {
+        return validationError;
+      }
+    }
+  }
+
+  if (
+    (inputMode === 'reference' ||
+      inputMode === 'first_frame' ||
+      inputMode === 'first_last_frame') &&
+    requiresUpload &&
+    imageCount === 0
+  ) {
+    return '当前模型至少需要上传 1 张参考图后再生成';
+  }
+
+  if (inputMode === 'motion_control') {
+    if (requiresUpload && imageCount === 0) {
+      return '当前动作控制模型需要先上传人物/主体参考图后再生成';
+    }
+    if (requiresUpload && videoCount === 0) {
+      return '当前动作控制模型还需要上传动作参考视频后再生成';
+    }
+  }
+
+  if (
+    (inputMode === 'video_reference' ||
+      inputMode === 'video_continue' ||
+      inputMode === 'video_edit') &&
+    requiresUpload &&
+    videoCount === 0
+  ) {
+    return inputMode === 'video_continue'
+      ? '当前模型需要先上传续写视频后再生成'
+      : inputMode === 'video_edit'
+        ? '当前模型需要先上传待编辑视频后再生成'
+        : '当前模型需要先上传参考视频后再生成';
+  }
+
+  if (inputMode === 'video_continue' && requestedDurationSeconds > 0) {
+    const continuationLabel =
+      String(
+        uploadMeta.clips?.label
+        || uploadMeta.video?.label
+        || uploadMeta.reference_video?.label
+        || '续写视频'
+      ).trim() || '续写视频';
+    const tooLongVideo = files.find((file) => {
+      if (!file.mimeType.startsWith('video/')) return false;
+      const durationSeconds = getRequestFileDurationSeconds(file);
+      return Boolean(durationSeconds && durationSeconds >= requestedDurationSeconds);
+    });
+
+    if (tooLongVideo) {
+      const sourceDuration = getRequestFileDurationSeconds(tooLongVideo);
+      if (sourceDuration) {
+        return `${continuationLabel}当前时长为 ${roundMediaDurationSeconds(sourceDuration)} 秒，需小于所选生成时长 ${requestedDurationSeconds} 秒`;
+      }
+    }
+  }
+
+  const selectedReferenceCount = getSelectedReferenceCount(request, model);
+  if (
+    selectedReferenceCount > 0 &&
+    (inputMode === 'reference' || inputMode === 'motion_control') &&
+    imageCount > 0 &&
+    imageCount < selectedReferenceCount
+  ) {
+    return `当前参考图数量设置为 ${selectedReferenceCount}，请至少上传 ${selectedReferenceCount} 张参考图`;
+  }
+
+  return null;
+}
 
 function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGenerateRequest['videoConfigObject'] {
   const raw = (input.videoConfigObject || input.video_config) as Record<string, unknown> | undefined;
@@ -84,6 +364,9 @@ const MAX_REFERENCE_IMAGE_BYTES = 50 * 1024 * 1024;
 const RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1500;
 const RATE_LIMIT_MAX_DELAY_MS = 10000;
+const UPSTREAM_DISABLE_MODEL_ERROR_SNIPPETS = [
+  '当前分组下该模型暂未配置渠道',
+];
 
 function isRateLimitError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -100,6 +383,12 @@ function getRateLimitDelayMs(attempt: number): number {
   const delay = Math.min(RATE_LIMIT_BASE_DELAY_MS * 2 ** (attempt - 1), RATE_LIMIT_MAX_DELAY_MS);
   const jitter = Math.floor(delay * 0.25 * Math.random());
   return delay - jitter;
+}
+
+function shouldDisableVideoModelForUpstreamError(message: string): boolean {
+  const normalized = String(message || '').trim();
+  if (!normalized) return false;
+  return UPSTREAM_DISABLE_MODEL_ERROR_SNIPPETS.some((snippet) => normalized.includes(snippet));
 }
 
 async function generateWithRateLimitRetry(
@@ -236,7 +525,33 @@ async function processGenerationTask(
     // 调用 Sora API 生成内容
     const result = await generateWithRateLimitRetry(processedBody, onProgress, generationId);
 
-    const savedUrl = await saveMediaAsync(generationId, result.url, { publicBaseUrl });
+    persistedUpstreamMeta = {
+      ...persistedUpstreamMeta,
+      upstreamFinal: true,
+      upstreamResultUrl: result.url,
+      upstreamUpdatedAt: Date.now(),
+    };
+
+    const savedAsset = await saveMediaAsset(generationId, result.url, {
+      publicBaseUrl,
+      storageMode: 'runtime',
+    });
+    if (savedAsset.kind === 'image' || savedAsset.kind === 'audio') {
+      throw new Error(
+        `上游返回的是${getMediaKindLabel(savedAsset.kind)}而不是视频，请更换模型或分组后重试`
+      );
+    }
+
+    const savedUrl = savedAsset.url;
+    const runtimeMediaFilename = extractRuntimeMediaFilenameFromUrl(savedUrl, publicBaseUrl);
+    if (runtimeMediaFilename) {
+      persistedUpstreamMeta = {
+        ...persistedUpstreamMeta,
+        runtimeMediaCachedAt: Date.now(),
+        runtimeMediaCachedFrom: result.url,
+        runtimeMediaOriginTimestamp: Date.now(),
+      };
+    }
 
     console.log(`[Task ${generationId}] 生成成功:`, savedUrl);
 
@@ -245,10 +560,7 @@ async function processGenerationTask(
       status: 'completed',
       resultUrl: savedUrl,
       params: {
-        ...buildPersistedParams(100, {
-          upstreamFinal: true,
-          upstreamResultUrl: result.url,
-        }),
+        ...buildPersistedParams(100),
         videoId: result.videoId,
         videoChannelId: result.videoChannelId,
         permalink: result.permalink,
@@ -291,6 +603,15 @@ async function processGenerationTask(
       await refundGenerationBalance(generationId, userId, prechargedCost);
     } catch (refundErr) {
       console.error(`[Task ${generationId}] Refund failed:`, refundErr);
+    }
+
+    if (body.modelId && shouldDisableVideoModelForUpstreamError(errorMessage)) {
+      try {
+        await updateVideoModel(body.modelId, { enabled: false });
+        console.warn(`[Task ${generationId}] 已自动禁用上游无渠道的视频模型: ${body.modelId}`);
+      } catch (disableErr) {
+        console.error(`[Task ${generationId}] 自动禁用无渠道模型失败:`, disableErr);
+      }
     }
   }
 }
@@ -364,11 +685,47 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '用户不存在' }, { status: 401 });
     }
 
-    const videoModelConfig = normalizedBody.modelId
-      ? await getVideoModelWithChannel(normalizedBody.modelId)
+    const videoModelConfig = normalizedBody.modelId || normalizedBody.model
+      ? await resolveVideoModelWithChannelSelection({
+          modelId: normalizedBody.modelId,
+          model: normalizedBody.model,
+        })
       : null;
+    if (normalizedBody.modelId && !videoModelConfig) {
+      return NextResponse.json(
+        { error: '当前选择的模型已下线或渠道已变更，请刷新页面后重新选择模型' },
+        { status: 400 }
+      );
+    }
+    if (videoModelConfig?.model && !videoModelConfig.model.enabled) {
+      return NextResponse.json({ error: '视频模型已禁用' }, { status: 400 });
+    }
+    if (videoModelConfig?.channel && !videoModelConfig.channel.enabled) {
+      return NextResponse.json({ error: '视频渠道已禁用' }, { status: 400 });
+    }
     if (videoModelConfig?.model?.name) {
+      normalizedBody.modelId = videoModelConfig.model.id;
       normalizedBody.model = videoModelConfig.model.name;
+    }
+    if (
+      videoModelConfig?.model
+      && ['veo3.1-lite'].includes(String(videoModelConfig.model.apiModel || videoModelConfig.model.name || '').trim().toLowerCase())
+    ) {
+      return NextResponse.json(
+        { error: '该旧模型已下线，请改用 veo3.1、veo3.1-4KHD 或其他当前可用模型' },
+        { status: 400 }
+      );
+    }
+
+    const sanitizedVideoConfigObject = sanitizeLingkeVideoConfigObject(normalizedVideoConfigObject);
+    normalizedBody.videoConfigObject = sanitizedVideoConfigObject;
+    normalizedBody.video_config = sanitizedVideoConfigObject;
+    const inputValidationError = validateVideoRequestInputs(
+      normalizedBody,
+      videoModelConfig?.model,
+    );
+    if (inputValidationError) {
+      return NextResponse.json({ error: inputValidationError }, { status: 400 });
     }
     const configuredSeconds =
       normalizedVideoConfigObject?.video_length
@@ -381,7 +738,7 @@ export async function POST(request: NextRequest) {
           user,
           model: videoModelConfig.model,
           duration: configuredSeconds,
-          videoConfigObject: normalizedVideoConfigObject,
+          videoConfigObject: sanitizedVideoConfigObject,
         })
       : (() => {
           const normalizedDuration = (body.duration || body.model || '').toLowerCase();
@@ -429,7 +786,7 @@ export async function POST(request: NextRequest) {
           modelId: normalizedBody.modelId,
           aspectRatio: body.aspectRatio,
           duration: body.duration,
-          videoConfigObject: normalizedVideoConfigObject,
+          videoConfigObject: sanitizedVideoConfigObject,
           progress: 0,
         },
         resultUrl: '',

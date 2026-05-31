@@ -6,6 +6,7 @@ import type {
   VideoModel,
   VideoModelFeatures,
 } from '@/types';
+import { isRetiredLingkeVideoModel } from '@/lib/lingke-video-sync';
 
 type VideoModelWithChannel = {
   model: VideoModel;
@@ -758,6 +759,8 @@ export function buildSafeVideoModels(
   > = [];
 
   models.forEach((model, index) => {
+    if (isRetiredLingkeVideoModel(model.apiModel, model.name)) return;
+
     const channel = channelMap.get(model.channelId);
     if (!channel || (enabledOnly && !channel.enabled)) return;
 

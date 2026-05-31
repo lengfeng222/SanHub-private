@@ -6,6 +6,8 @@ import {
   type UserGenerationKindFilter,
   type UserGenerationStatusFilter,
 } from '@/lib/db';
+import { shouldHideGenerationFromUserFeeds } from '@/lib/generation-visibility';
+import { RUNTIME_MEDIA_RETENTION_MS, triggerRuntimeMediaCleanup } from '@/lib/media-storage';
 import { checkRateLimit, RateLimitConfig } from '@/lib/rate-limit';
 import type { Generation } from '@/types';
 
@@ -34,6 +36,10 @@ function parseHistoryStatus(value: string | null): UserGenerationStatusFilter {
 }
 
 function convertToMediaUrl(generation: Generation): Generation {
+  if (generation.params?.runtimeMediaExpired) {
+    return generation;
+  }
+
   const resultUrl = typeof generation.resultUrl === 'string' ? generation.resultUrl : '';
   const upstreamResultUrl =
     typeof generation.params === 'object' && generation.params && 'upstreamResultUrl' in generation.params
@@ -52,6 +58,49 @@ function convertToMediaUrl(generation: Generation): Generation {
   }
 
   return generation;
+}
+
+function resolveHistoryMediaTimestamp(generation: Generation): number {
+  const candidates = [
+    Number(generation.params?.runtimeMediaOriginTimestamp ?? 0),
+    Number(generation.params?.upstreamUpdatedAt ?? 0),
+    Number(generation.updatedAt ?? 0),
+    Number(generation.createdAt ?? 0),
+  ];
+
+  for (const value of candidates) {
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+
+  return Date.now();
+}
+
+function shouldTreatGenerationMediaAsExpired(generation: Generation): boolean {
+  if (generation.status !== 'completed') return false;
+
+  const hasMediaReference = Boolean(
+    generation.resultUrl
+    || generation.params?.upstreamResultUrl
+    || generation.params?.videoId
+  );
+  if (!hasMediaReference) return false;
+
+  return Date.now() - resolveHistoryMediaTimestamp(generation) >= RUNTIME_MEDIA_RETENTION_MS;
+}
+
+function markExpiredGenerationMedia(generation: Generation): Generation {
+  if (!shouldTreatGenerationMediaAsExpired(generation)) {
+    return generation;
+  }
+
+  return {
+    ...generation,
+    resultUrl: '',
+    params: {
+      ...(generation.params || {}),
+      runtimeMediaExpired: true,
+    },
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -81,13 +130,20 @@ export async function GET(request: NextRequest) {
     const kind = parseHistoryKind(searchParams.get('kind'));
     const status = parseHistoryStatus(searchParams.get('status'));
 
+    void triggerRuntimeMediaCleanup().catch((error) => {
+      console.warn('[History API] Runtime media cleanup failed:', error);
+    });
+
     const generations = await getUserGenerations(session.user.id, limit, offset, {
       kind,
       status,
     });
     
     // 将 base64 URL 转换为媒体 API URL，大幅减小响应体积
-    const processedGenerations = generations.map(convertToMediaUrl);
+    const processedGenerations = generations
+      .filter((generation) => !shouldHideGenerationFromUserFeeds(generation))
+      .map(markExpiredGenerationMedia)
+      .map(convertToMediaUrl);
     
     return NextResponse.json(
       {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { BarChart3, Users, Zap, TrendingUp, Loader2, MessageSquare } from 'lucide-react';
+import { BarChart3, Users, Zap, TrendingUp, Loader2 } from 'lucide-react';
 import type { StatsOverview } from '@/types';
 import { formatBalance } from '@/lib/utils';
 
@@ -65,10 +65,10 @@ export default function StatsPage() {
     'gemini-image': { label: 'Gemini 图像', color: 'from-emerald-500 to-lime-500' },
     'zimage-image': { label: 'Z-Image 图像', color: 'from-amber-500 to-orange-500' },
     'gitee-image': { label: 'Gitee 图像', color: 'from-pink-500 to-rose-500' },
-    chat: { label: 'Chat', color: 'from-violet-500 to-fuchsia-500' },
     'character-card': { label: '角色卡', color: 'from-indigo-500 to-blue-500' },
   };
   const typeItems = stats.generationTypes
+    .filter((item) => item.type !== 'chat')
     .map((item) => {
       const meta = typeMeta[item.type] || { label: item.type, color: 'from-slate-500 to-slate-400' };
       const percent = totalTypeCount > 0 ? Math.round((item.count / totalTypeCount) * 100) : 0;
@@ -98,10 +98,9 @@ export default function StatsPage() {
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
         <StatCard icon={Users} label="总用户" value={stats.totalUsers} color="blue" />
         <StatCard icon={Zap} label="总生成" value={stats.totalGenerations} color="green" />
-        <StatCard icon={MessageSquare} label="聊天模型" value={stats.totalChatModels} color="violet" />
         <StatCard icon={Users} label="今日新增用户" value={stats.todayUsers} color="sky" />
         <StatCard icon={BarChart3} label="今日生成" value={stats.todayGenerations} color="orange" />
-        <StatCard icon={MessageSquare} label="启用模型" value={stats.enabledChatModels} color="emerald" />
+        <StatCard icon={TrendingUp} label="总积分" value={stats.totalPoints} color="emerald" />
       </div>
 
       {/* Generation Chart */}
@@ -276,4 +275,3 @@ function StatCard({ icon: Icon, label, value, color }: {
     </div>
   );
 }
-

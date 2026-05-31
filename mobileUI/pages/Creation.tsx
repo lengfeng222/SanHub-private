@@ -215,14 +215,6 @@ export const VideoGeneration: React.FC = () => {
            ))}
         </div>
         
-        <Button 
-          variant="outline" 
-          size="sm" 
-          onClick={() => navigate('/video/character-card')}
-          className="hidden md:flex items-center gap-2 text-amber-400 border-amber-400/20 hover:bg-amber-400/10"
-        >
-          <UserSquare2 className="w-4 h-4" /> 角色提取
-        </Button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1">
@@ -272,15 +264,6 @@ export const VideoGeneration: React.FC = () => {
                </Button>
            </Surface>
            
-           {/* Mobile Only Character Card Button */}
-           <Button 
-            variant="outline" 
-            size="sm" 
-            onClick={() => navigate('/video/character-card')}
-            className="md:hidden w-full flex items-center justify-center gap-2 text-amber-400 border-amber-400/20 hover:bg-amber-400/10"
-          >
-            <UserSquare2 className="w-4 h-4" /> 去提取角色卡
-          </Button>
         </div>
 
         <div className="flex flex-col gap-4">

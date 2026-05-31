@@ -14,7 +14,6 @@ export function formatLegacyVideoModelLabel(value?: string): string {
   if (!raw) return '';
   const lower = raw.toLowerCase();
 
-  if (lower.includes('veo3.1-lite')) return 'veo3.1-lite';
   if (lower.includes('veo3.1')) return 'veo3.1';
   if (lower.includes('veo')) return 'Veo';
   if (lower.includes('wan') || lower.includes('万相')) return '万相';

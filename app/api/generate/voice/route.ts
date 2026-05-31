@@ -5,6 +5,7 @@ import { generateAudio } from '@/lib/audio-generator';
 import { getSystemConfig, getUserById, saveGeneration, updateGeneration, updateUserBalance, refundGenerationBalance } from '@/lib/db';
 import { saveMediaAsync } from '@/lib/media-storage';
 import { calculateBillingCost } from '@/lib/billing';
+import { getBaseUrlFromRequest } from '@/lib/epay';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
@@ -67,8 +68,9 @@ export async function POST(request: NextRequest) {
 
     const result = await generateAudio({ kind: KIND, prompt, model, voice, format });
     const savedUrl = await saveMediaAsync(generation.id, result.url, {
-      publicBaseUrl: new URL(request.url).origin,
+      publicBaseUrl: getBaseUrlFromRequest(request),
       filename: `${generation.id}.${result.format || 'mp3'}`,
+      storageMode: 'runtime',
     });
 
     await updateGeneration(generation.id, {

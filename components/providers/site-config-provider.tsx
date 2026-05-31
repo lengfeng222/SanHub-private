@@ -8,7 +8,6 @@ export interface ExtendedSiteConfig extends SiteConfig {
   defaultBalance: number;
   squareEnabled: boolean;
   gachaEnabled: boolean;
-  characterCardEnabled: boolean;
   inviteEnabled: boolean;
   inviteRewardEnabled: boolean;
   inviteeBonusPoints: number;
@@ -18,15 +17,14 @@ export interface ExtendedSiteConfig extends SiteConfig {
 const defaultSiteConfig: ExtendedSiteConfig = {
   siteName: '幻途',
   siteTagline: '幻途 AI 内容创作平台',
-  siteDescription: '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
-  siteSubDescription: '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+  siteDescription: '幻途，专注图像与视频生成的 AI 创作平台。',
+  siteSubDescription: '支持文生图、参考图生成、文生视频、图生视频与 24 小时站内缓存，让你更快完成从灵感到成片的创作流程。',
   contactEmail: 'support@aigcone.cn',
   copyright: '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
   poweredBy: '幻途 · Huantu AI',
   defaultBalance: 50,
   squareEnabled: true,
   gachaEnabled: true,
-  characterCardEnabled: true,
   inviteEnabled: true,
   inviteRewardEnabled: true,
   inviteeBonusPoints: 100,
@@ -71,7 +69,6 @@ export function SiteConfigProvider({ children, initialConfig }: SiteConfigProvid
           defaultBalance: data.data.defaultBalance ?? 50,
           squareEnabled: data.data.squareEnabled ?? true,
           gachaEnabled: data.data.gachaEnabled ?? true,
-          characterCardEnabled: data.data.characterCardEnabled ?? true,
           inviteEnabled: data.data.inviteEnabled ?? true,
           inviteRewardEnabled: data.data.inviteRewardEnabled ?? true,
           inviteeBonusPoints: data.data.inviteeBonusPoints ?? 100,

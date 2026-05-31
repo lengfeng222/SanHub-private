@@ -1,5 +1,6 @@
 import type { VideoConfigObject, VideoDuration, VideoModelFeatures } from '@/types';
 import { estimateVideoDurationCost } from '@/lib/video-model-normalizer';
+import { sanitizeLingkeVideoConfigObject } from '@/lib/lingke-video-config';
 import {
   createLingkeSyncedVideoModelFromName,
   fetchLingkeVisibleVideoModels,
@@ -48,6 +49,25 @@ export type LingkeRemoteApiVideoModel = {
 };
 
 const DEFAULT_TEMPLATE_DESCRIPTION = '灵刻/lk666 视频模型 | 默认同步模板';
+const IMAGE_UPLOAD_PARAM_NAMES = [
+  'images',
+  'image',
+  'image_url',
+  'image_urls',
+  'img_url',
+  'img_urls',
+  'reference_urls',
+  'reference_image',
+  'reference_image_url',
+  'reference_image_urls',
+  'input_reference',
+  'first_frame_url',
+  '_first_frame_url',
+  'last_frame_url',
+  'assets',
+];
+const VIDEO_UPLOAD_PARAM_NAMES = ['video', 'video_url', 'reference_video', 'clips'];
+const AUDIO_UPLOAD_PARAM_NAMES = ['audio_url', 'sound_file', 'lip_ref_url'];
 
 const LINGKE_VIDEO_ALIAS_GROUPS: string[][] = [
   ['Sora-2 官转版', 'Sora-2 Official'],
@@ -82,6 +102,11 @@ const LINGKE_VIDEO_ALIAS_GROUPS: string[][] = [
   ['SD 2.0 首尾帧', 'SD 2.0 First/Last Frames'],
   ['SD 2.0 全能参考', 'SD 2.0 All-purpose Reference'],
 ];
+const RETIRED_LINGKE_VIDEO_MODEL_ALIASES = new Set([
+  'veo3.1-lite',
+  'hailuo 2.3',
+  'hailuo-2.3',
+]);
 
 function normalizeName(value: unknown): string {
   return String(value || '').trim();
@@ -113,6 +138,11 @@ export function getLingkeVideoAliases(...values: Array<string | null | undefined
   }
 
   return dedupeStrings(aliases);
+}
+
+export function isRetiredLingkeVideoModel(...values: Array<string | null | undefined>): boolean {
+  return dedupeStrings(values)
+    .some((value) => RETIRED_LINGKE_VIDEO_MODEL_ALIASES.has(value.toLowerCase()));
 }
 
 function normalizeAspectRatioValue(value: string): string | null {
@@ -156,6 +186,37 @@ function getRemoteParams(remote: LingkeRemoteApiVideoModel): LingkeRemoteApiPara
   return Array.isArray(remote.params) ? remote.params.filter(Boolean) : [];
 }
 
+function buildRemoteCapabilityText(remote: LingkeRemoteApiVideoModel): string {
+  return [
+    remote.name,
+    remote.display_name,
+    remote.description,
+    remote.input_hint,
+    ...(remote.tags || []),
+    ...getRemoteParams(remote).flatMap((param) => [
+      param.name,
+      param.label,
+      param.description,
+      ...getParamOptions(param).flatMap((option) => [option.value, option.label, option.description]),
+    ]),
+  ]
+    .map((item) => normalizeName(item).toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function hasRemoteUploadParam(remote: LingkeRemoteApiVideoModel, names: string[]): boolean {
+  const normalizedNames = new Set(names.map((name) => name.toLowerCase()));
+  return getRemoteParams(remote).some((param) => normalizedNames.has(normalizeName(param.name).toLowerCase()));
+}
+
+function hasRemoteTextCapability(remote: LingkeRemoteApiVideoModel, haystack = buildRemoteCapabilityText(remote)): boolean {
+  return (
+    /\btext[-\s]?to[-\s]?video\b|文生视频|文本生成视频|leave empty for text[-\s]?to[-\s]?video|omit for text[-\s]?to[-\s]?video/i.test(haystack)
+    || getRemoteParams(remote).some((param) => normalizeName(param.name).toLowerCase() === 'generation_type')
+  );
+}
+
 function findRemoteParam(remote: LingkeRemoteApiVideoModel, names: string[]): LingkeRemoteApiParam | undefined {
   const lowerNames = names.map((name) => name.toLowerCase());
   return getRemoteParams(remote).find((param) => lowerNames.includes(normalizeName(param.name).toLowerCase()));
@@ -163,6 +224,100 @@ function findRemoteParam(remote: LingkeRemoteApiVideoModel, names: string[]): Li
 
 function getParamOptions(param?: LingkeRemoteApiParam): LingkeRemoteApiParamOption[] {
   return Array.isArray(param?.options) ? param.options.filter(Boolean) : [];
+}
+
+type LingkeParamOptionEntry = {
+  value: string;
+  label: string;
+};
+
+function collectParamOptionEntries(value: unknown): LingkeParamOptionEntry[] {
+  if (!Array.isArray(value)) return [];
+
+  const entries: LingkeParamOptionEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const item of value) {
+    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+      const optionValue = normalizeName(item);
+      if (!optionValue) continue;
+      const key = optionValue.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ value: optionValue, label: optionValue });
+      continue;
+    }
+
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const optionValue = normalizeName((item as { value?: unknown }).value ?? (item as { label?: unknown }).label);
+    if (!optionValue) continue;
+    const key = optionValue.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({
+      value: optionValue,
+      label: normalizeName((item as { label?: unknown }).label) || optionValue,
+    });
+  }
+
+  return entries;
+}
+
+function getMergedExtraParamEntries(
+  extraParams: Record<string, unknown>,
+  paramNames: string[],
+): LingkeParamOptionEntry[] {
+  const dynamic = extraParams.dynamic_param_options;
+  if (dynamic && typeof dynamic === 'object' && !Array.isArray(dynamic)) {
+    for (const paramName of paramNames) {
+      const entries = collectParamOptionEntries((dynamic as Record<string, unknown>)[paramName]);
+      if (entries.length > 0) return entries;
+    }
+  }
+
+  const upstreamParams = Array.isArray(extraParams.upstream_params) ? extraParams.upstream_params : [];
+  for (const paramName of paramNames) {
+    const matched = upstreamParams.find(
+      (item) => item && typeof item === 'object' && !Array.isArray(item) && normalizeName((item as { name?: unknown }).name) === paramName
+    );
+    if (!matched || typeof matched !== 'object' || Array.isArray(matched)) continue;
+    const entries = collectParamOptionEntries((matched as { options?: unknown }).options);
+    if (entries.length > 0) return entries;
+  }
+
+  return [];
+}
+
+function resolvePreferredTopLevelOption(
+  extraParams: Record<string, unknown>,
+  paramNames: string[],
+  templateValue: unknown,
+  remoteValue: unknown,
+): string | undefined {
+  const entries = getMergedExtraParamEntries(extraParams, paramNames);
+
+  const matchCandidate = (value: unknown): string | undefined => {
+    const normalized = normalizeName(value).toLowerCase();
+    if (!normalized) return undefined;
+
+    if (entries.length === 0) {
+      return normalizeName(value) || undefined;
+    }
+
+    const matched = entries.find((entry) => (
+      entry.value.toLowerCase() === normalized || entry.label.toLowerCase() === normalized
+    ));
+    return matched?.value;
+  };
+
+  return (
+    matchCandidate(templateValue)
+    || matchCandidate(remoteValue)
+    || entries[0]?.value
+    || normalizeName(templateValue)
+    || normalizeName(remoteValue)
+    || undefined
+  );
 }
 
 function extractAspectRatios(remote: LingkeRemoteApiVideoModel): Array<{ value: string; label: string }> {
@@ -228,20 +383,54 @@ function extractUploadFileRange(param?: LingkeRemoteApiParam): { min?: number; m
   const text = [param?.label, param?.description]
     .map((item) => normalizeName(item).toLowerCase())
     .join(' ');
+  const hasOptionalMarker =
+    /\boptional\b/i.test(text)
+    || /omit\s+for\s+text[-\s]?to[-\s]?video/i.test(text)
+    || /0\s*[=:]\s*text[-\s]?to[-\s]?video/i.test(text)
+    || /0\s*[=:]\s*文生视频/i.test(text);
 
-  const rangeMatch = text.match(/(\\d+)\\s*[-~]\\s*(\\d+)\\s*(images?|files?|张)/i);
+  const rangeMatch = text.match(/(\d+)\s*[-~]\s*(\d+)\s*(images?|files?|张)/i);
   if (rangeMatch) {
     const min = Number.parseInt(rangeMatch[1], 10);
     const max = Number.parseInt(rangeMatch[2], 10);
-    if (Number.isFinite(min) && Number.isFinite(max) && min > 0 && max >= min) {
-      return { min, max };
+    if (Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max >= min) {
+      if (min === 0 || hasOptionalMarker) {
+        return { max };
+      }
+      if (min > 0) {
+        return { min, max };
+      }
     }
   }
 
-  const singleMatch = text.match(/(\\d+)\\s*(images?|files?|张)/i);
+  const zeroToTextModeRangeMatch = text.match(/0\s*(images?|files?|张).*?text[-\s]?to[-\s]?video/i);
+  if (zeroToTextModeRangeMatch) {
+    const fallbackRange = text.match(/0\s*[-~]\s*(\d+)\s*(images?|files?|张)/i);
+    if (fallbackRange) {
+      const max = Number.parseInt(fallbackRange[1], 10);
+      if (Number.isFinite(max) && max > 0) {
+        return { max };
+      }
+    }
+  }
+
+  const upperBoundMatch = text.match(
+    /(?:up to|at most|max(?:imum)?|no more than|最多(?:支持)?|至多|不超过)\s*(\d+)\s*(images?|files?|张)/i
+  );
+  if (upperBoundMatch) {
+    const max = Number.parseInt(upperBoundMatch[1], 10);
+    if (Number.isFinite(max) && max > 0) {
+      return { max };
+    }
+  }
+
+  const singleMatch = text.match(/(\d+)\s*(images?|files?|张)/i);
   if (singleMatch) {
     const value = Number.parseInt(singleMatch[1], 10);
     if (Number.isFinite(value) && value > 0) {
+      if (hasOptionalMarker) {
+        return { max: value };
+      }
       return { min: value, max: value };
     }
   }
@@ -259,51 +448,64 @@ function inferUploadMode(remote: LingkeRemoteApiVideoModel):
   | 'video_edit'
   | 'motion_control' {
   const params = getRemoteParams(remote);
-  const hasVideoUpload = params.some((param) => ['video', 'video_url', 'reference_video', 'clips'].includes(normalizeName(param.name).toLowerCase()));
-  const hasImageUpload = params.some((param) => ['images', 'image', 'image_url', 'reference_urls', 'input_reference'].includes(normalizeName(param.name).toLowerCase()));
+  const rawName = `${normalizeName(remote.name)} ${normalizeName(remote.display_name)}`.toLowerCase();
+  const hasVideoUpload = hasRemoteUploadParam(remote, VIDEO_UPLOAD_PARAM_NAMES);
+  const hasImageUpload = hasRemoteUploadParam(remote, IMAGE_UPLOAD_PARAM_NAMES);
   const imageParamText = params
-    .filter((param) => ['images', 'image', 'image_url', 'reference_urls', 'input_reference'].includes(normalizeName(param.name).toLowerCase()))
+    .filter((param) => IMAGE_UPLOAD_PARAM_NAMES.includes(normalizeName(param.name).toLowerCase()))
     .flatMap((param) => [param.label, param.description])
     .map((item) => normalizeName(item).toLowerCase())
     .join(' ');
-  const haystack = [
-    remote.name,
-    remote.display_name,
-    remote.description,
-    remote.input_hint,
-    ...params.flatMap((param) => [param.name, param.label, param.description]),
-  ]
-    .map((item) => normalizeName(item).toLowerCase())
-    .join(' ');
+  const haystack = buildRemoteCapabilityText(remote);
 
-  if (haystack.includes('motion control')) return 'motion_control';
-  if (haystack.includes('video extension') || haystack.includes('续写') || params.some((param) => normalizeName(param.name).toLowerCase() === 'clips')) {
+  if (/动作控制|motion control/.test(rawName)) return 'motion_control';
+  if (/video extension|续写/.test(rawName) || params.some((param) => normalizeName(param.name).toLowerCase() === 'clips')) {
     return 'video_continue';
   }
-  if (haystack.includes('video editing') || haystack.includes('face swap')) return 'video_edit';
-  if (imageParamText.includes('first and last') || imageParamText.includes('first/last')) return 'first_last_frame';
-  if (imageParamText.includes('first frame')) return 'first_frame';
-  if (haystack.includes('video reference')) return 'video_reference';
+  if (/video editing|face swap|视频编辑/.test(rawName)) {
+    return 'video_edit';
+  }
+  if (
+    /first\/last|first and last|首尾帧/.test(rawName)
+    || imageParamText.includes('first and last')
+    || imageParamText.includes('first/last')
+  ) {
+    return 'first_last_frame';
+  }
+  if (/first frame|首帧/.test(rawName) || imageParamText.includes('first frame')) return 'first_frame';
+  if (/video reference|视频参考/.test(rawName) && hasVideoUpload) return 'video_reference';
   if (hasVideoUpload && hasImageUpload) return 'video_reference';
-  if (hasVideoUpload) return 'video_edit';
-  if (haystack.includes('first/last') || haystack.includes('首尾帧')) return 'first_last_frame';
-  if (haystack.includes('first frame') || haystack.includes('首帧')) return 'first_frame';
-  if (haystack.includes('reference-to-video') || haystack.includes('参考')) return 'reference';
+  if (hasVideoUpload) {
+    return /video editing|face swap|视频编辑/.test(haystack) ? 'video_edit' : 'video_reference';
+  }
   if (hasImageUpload) {
     return 'reference';
   }
+  if (/first\/last|first and last|首尾帧/.test(rawName)) return 'first_last_frame';
+  if (/first frame|首帧/.test(rawName)) return 'first_frame';
+  if (/reference-to-video|参考生|参考/.test(rawName)) return 'reference';
   return 'text';
 }
 
 function inferFeatures(remote: LingkeRemoteApiVideoModel, uploadMode: ReturnType<typeof inferUploadMode>): VideoModelFeatures {
   const paramNames = new Set(getRemoteParams(remote).map((param) => normalizeName(param.name).toLowerCase()));
-  const hasImageUpload = ['images', 'image', 'image_url', 'reference_urls', 'input_reference'].some((name) => paramNames.has(name));
-  const hasVideoUpload = ['video', 'video_url', 'reference_video', 'clips'].some((name) => paramNames.has(name));
+  const hasImageUpload = IMAGE_UPLOAD_PARAM_NAMES.some((name) => paramNames.has(name));
+  const hasVideoUpload = VIDEO_UPLOAD_PARAM_NAMES.some((name) => paramNames.has(name));
+  const haystack = buildRemoteCapabilityText(remote);
+  const textToVideo =
+    hasRemoteTextCapability(remote, haystack)
+    || /\bpure text[-\s]?to[-\s]?video\b|仅文本|纯文本/i.test(haystack);
+  const imageToVideo =
+    hasImageUpload
+    || /\bimage[-\s]?to[-\s]?video\b|图生视频|reference[-\s]?based|reference[-\s]?to[-\s]?video|first[-\s]?frame|first and last|首帧|首尾帧|multi[-\s]?image|多图参考/i.test(haystack);
+  const videoToVideo =
+    hasVideoUpload
+    || /\bvideo[-\s]?to[-\s]?video\b|视频转视频|video reference|video extension|video editing|续写|编辑|动作控制/i.test(haystack);
 
   return {
-    textToVideo: uploadMode !== 'video_edit' && uploadMode !== 'video_reference',
-    imageToVideo: hasImageUpload || ['reference', 'first_frame', 'first_last_frame', 'motion_control'].includes(uploadMode),
-    videoToVideo: hasVideoUpload || ['video_reference', 'video_continue', 'video_edit'].includes(uploadMode),
+    textToVideo,
+    imageToVideo: imageToVideo || ['reference', 'first_frame', 'first_last_frame', 'motion_control'].includes(uploadMode),
+    videoToVideo: videoToVideo || ['video_reference', 'video_continue', 'video_edit', 'motion_control'].includes(uploadMode),
     supportStyles: false,
   };
 }
@@ -334,6 +536,7 @@ function buildDurationOptions(remote: LingkeRemoteApiVideoModel, model: LingkeSy
 function buildRemoteExtraParams(
   remote: LingkeRemoteApiVideoModel,
   uploadMode: ReturnType<typeof inferUploadMode>,
+  features: VideoModelFeatures,
   aspectRatios: Array<{ value: string; label: string }>,
   resolutions: string[],
 ): {
@@ -350,11 +553,16 @@ function buildRemoteExtraParams(
     .filter((name) => name && name !== 'prompt');
 
   const aspectRatioParam = findRemoteParam(remote, ['aspect_ratio', 'ratio', 'orientation']);
+  const durationParam = findRemoteParam(remote, ['duration', 'video_length', 'length', 'time', 'seconds']);
   const generationModeParam = findRemoteParam(remote, ['generation_mode', 'mode']);
   const referenceCountOptions = extractReferenceCountOptions(remote);
   const imageUploadParamNames: string[] = [];
   const videoUploadParamNames: string[] = [];
   const audioUploadParamNames: string[] = [];
+  const requiredUploadParamNames: string[] = [];
+  const requiredImageUploadParamNames: string[] = [];
+  const requiredVideoUploadParamNames: string[] = [];
+  const requiredAudioUploadParamNames: string[] = [];
   const dynamicDefaults: Record<string, unknown> = {};
   const dynamicParamOptions: Record<string, Array<{ value: string; label: string; description?: string }>> = {};
   const uploadParamMeta: Record<string, LingkeUploadParamMeta> = {};
@@ -367,23 +575,39 @@ function buildRemoteExtraParams(
     const paramType = normalizeName(param.type).toLowerCase();
     const options = getParamOptions(param);
 
-    if (lowerName === 'images' || lowerName === 'image' || lowerName === 'image_url' || lowerName === 'reference_urls' || lowerName === 'input_reference') {
+    if (IMAGE_UPLOAD_PARAM_NAMES.includes(lowerName)) {
       imageUploadParamNames.push(paramName);
       const fileRange = extractUploadFileRange(param);
+      const isRequired = Boolean(param.required);
+      if (isRequired) {
+        requiredUploadParamNames.push(paramName);
+        requiredImageUploadParamNames.push(paramName);
+      }
       uploadParamMeta[paramName] = {
         kind: 'image',
-        label: normalizeName(param.label) || undefined,
-        description: normalizeName(param.description) || undefined,
-        multiple: (fileRange.max || 0) > 1 || lowerName.endsWith('s'),
+        label:
+          lowerName === 'assets'
+            ? '角色 / 场景素材图'
+            : normalizeName(param.label) || undefined,
+        description:
+          lowerName === 'assets'
+            ? '上传角色、场景或道具图片，系统会自动转换为上游需要的 assets JSON 素材结构。'
+            : normalizeName(param.description) || undefined,
+        multiple: lowerName === 'assets' || (fileRange.max || 0) > 1 || lowerName.endsWith('s'),
         minFiles: fileRange.min,
         maxFiles: fileRange.max,
         accept: 'image/*',
       };
       continue;
     }
-    if (lowerName === 'video' || lowerName === 'video_url' || lowerName === 'reference_video' || lowerName === 'clips') {
+    if (VIDEO_UPLOAD_PARAM_NAMES.includes(lowerName)) {
       videoUploadParamNames.push(paramName);
       const fileRange = extractUploadFileRange(param);
+      const isRequired = Boolean(param.required);
+      if (isRequired) {
+        requiredUploadParamNames.push(paramName);
+        requiredVideoUploadParamNames.push(paramName);
+      }
       uploadParamMeta[paramName] = {
         kind: 'video',
         label: normalizeName(param.label) || undefined,
@@ -395,17 +619,36 @@ function buildRemoteExtraParams(
       };
       continue;
     }
-    if (lowerName === 'audio_url' || lowerName === 'sound_file' || lowerName === 'lip_ref_url') {
-      audioUploadParamNames.push(paramName);
+    if (AUDIO_UPLOAD_PARAM_NAMES.includes(lowerName)) {
       const fileRange = extractUploadFileRange(param);
+      const isLipReference =
+        lowerName === 'lip_ref_url'
+        || /face|lip[-\s]?sync|人脸|头像|口型|close-up/i.test(
+          `${normalizeName(param.label)} ${normalizeName(param.description)}`
+        );
+      const kind = isLipReference ? 'image' : 'audio';
+      if (kind === 'image') {
+        imageUploadParamNames.push(paramName);
+      } else {
+        audioUploadParamNames.push(paramName);
+      }
+      const isRequired = Boolean(param.required);
+      if (isRequired) {
+        requiredUploadParamNames.push(paramName);
+        if (kind === 'image') {
+          requiredImageUploadParamNames.push(paramName);
+        } else {
+          requiredAudioUploadParamNames.push(paramName);
+        }
+      }
       uploadParamMeta[paramName] = {
-        kind: 'audio',
+        kind,
         label: normalizeName(param.label) || undefined,
         description: normalizeName(param.description) || undefined,
         multiple: (fileRange.max || 0) > 1 || lowerName.endsWith('s'),
         minFiles: fileRange.min,
         maxFiles: fileRange.max,
-        accept: 'audio/*',
+        accept: kind === 'image' ? 'image/*' : 'audio/*',
       };
       continue;
     }
@@ -435,13 +678,24 @@ function buildRemoteExtraParams(
     dynamicDefaults[paramName] = firstValue;
   }
 
+  const hasAnyUploadParams = imageUploadParamNames.length > 0 || videoUploadParamNames.length > 0 || audioUploadParamNames.length > 0;
+  const uploadIsIntrinsicallyRequired =
+    uploadMode === 'motion_control'
+    || (!features.textToVideo && hasAnyUploadParams);
+
   const extraParams: Record<string, unknown> = {
     upload_mode: uploadMode,
-    requires_upload: uploadMode !== 'text',
+    requires_upload:
+      dedupeStrings(requiredUploadParamNames).length > 0
+      || uploadIsIntrinsicallyRequired,
     upload_param_names: dedupeStrings([...imageUploadParamNames, ...videoUploadParamNames, ...audioUploadParamNames]),
     image_upload_param_names: dedupeStrings(imageUploadParamNames),
     video_upload_param_names: dedupeStrings(videoUploadParamNames),
     audio_upload_param_names: dedupeStrings(audioUploadParamNames),
+    required_upload_param_names: dedupeStrings(requiredUploadParamNames),
+    required_image_upload_param_names: dedupeStrings(requiredImageUploadParamNames),
+    required_video_upload_param_names: dedupeStrings(requiredVideoUploadParamNames),
+    required_audio_upload_param_names: dedupeStrings(requiredAudioUploadParamNames),
     upstream_param_names: dedupeStrings(upstreamParamNames),
     submit_only_upstream_params: upstreamParamNames.length > 0,
     dynamic_param_options: dynamicParamOptions,
@@ -454,6 +708,9 @@ function buildRemoteExtraParams(
   }
   if (generationModeParam && normalizeName(generationModeParam.name) && normalizeName(generationModeParam.name) !== 'generation_mode') {
     extraParams.generation_mode_param_name = normalizeName(generationModeParam.name);
+  }
+  if (durationParam && normalizeName(durationParam.name) && normalizeName(durationParam.name) !== 'duration') {
+    extraParams.duration_param_name = normalizeName(durationParam.name);
   }
   if (resolutions.length > 0) {
     extraParams.image_resolution_options = resolutions;
@@ -494,8 +751,23 @@ function buildRemoteExtraParams(
 
   for (const [key, value] of Object.entries(dynamicDefaults)) {
     const isTopLevelMapped = ['generation_mode', 'mode', 'quality_version', 'model_version', 'model_variant', 'version', 'off_peak'].includes(key);
-    const isAspectRatioField = key === normalizeName(aspectRatioParam?.name).toLowerCase();
-    if (!isTopLevelMapped && !isAspectRatioField) {
+    const normalizedAspectRatioParamName = normalizeName(aspectRatioParam?.name).toLowerCase();
+    const normalizedDurationParamName = normalizeName(durationParam?.name).toLowerCase();
+    const isCanonicalVideoField = [
+      'aspect_ratio',
+      'ratio',
+      'orientation',
+      'duration',
+      'video_length',
+      'length',
+      'time',
+      'seconds',
+      'resolution',
+      'size',
+    ].includes(key);
+    const isAspectRatioField = key === normalizedAspectRatioParamName;
+    const isDurationField = key === normalizedDurationParamName;
+    if (!isTopLevelMapped && !isAspectRatioField && !isDurationField && !isCanonicalVideoField) {
       extraParams[key] = value;
     }
   }
@@ -518,16 +790,41 @@ function mergeRemoteModel(remote: LingkeRemoteApiVideoModel, imageUrl?: string):
       .map((alias) => createLingkeSyncedVideoModelFromName(alias, imageUrl))
       .find((candidate) => candidate.description !== DEFAULT_TEMPLATE_DESCRIPTION)
     || createLingkeSyncedVideoModelFromName(displayName, imageUrl);
+  const hasCuratedTemplate = template.description !== DEFAULT_TEMPLATE_DESCRIPTION;
   const uploadMode = inferUploadMode(remote);
   const remoteFeatures = inferFeatures(remote, uploadMode);
+  const mergedFeatures: VideoModelFeatures = hasCuratedTemplate
+    ? {
+        ...remoteFeatures,
+        ...template.features,
+        supportStyles: Boolean(template.features.supportStyles || remoteFeatures.supportStyles),
+      }
+    : {
+        ...template.features,
+        ...remoteFeatures,
+      };
   const aspectRatios = extractAspectRatios(remote);
   const resolutions = extractResolutionOptions(remote);
   const durations = buildDurationOptions(remote, template);
-  const defaultAspectRatio = aspectRatios[0]?.value || template.defaultAspectRatio || '16:9';
-  const defaultDuration = durations[0]?.value || template.defaultDuration || '8s';
+  const preferredTemplateAspectRatio = normalizeAspectRatioValue(template.defaultAspectRatio || '');
+  const defaultAspectRatio =
+    aspectRatios.find((ratio) => ratio.value === preferredTemplateAspectRatio)?.value
+    || aspectRatios[0]?.value
+    || template.defaultAspectRatio
+    || '16:9';
+  const defaultDuration =
+    durations.find((duration) => duration.value === template.defaultDuration)?.value
+    || durations[0]?.value
+    || template.defaultDuration
+    || '8s';
   const defaultVideoLength = Number.parseInt(defaultDuration, 10) || template.videoConfigObject.video_length || 8;
-  const defaultResolution = resolutions[0] || normalizeResolutionValue(String(template.videoConfigObject.resolution || '')) || '720P';
-  const remoteDefaults = buildRemoteExtraParams(remote, uploadMode, aspectRatios, resolutions);
+  const preferredTemplateResolution = normalizeResolutionValue(String(template.videoConfigObject.resolution || ''));
+  const defaultResolution =
+    resolutions.find((resolution) => resolution === preferredTemplateResolution)
+    || resolutions[0]
+    || preferredTemplateResolution
+    || '720P';
+  const remoteDefaults = buildRemoteExtraParams(remote, uploadMode, remoteFeatures, aspectRatios, resolutions);
 
   const mergedExtraParams = {
     ...(template.videoConfigObject.extra_params || {}),
@@ -539,10 +836,30 @@ function mergeRemoteModel(remote: LingkeRemoteApiVideoModel, imageUrl?: string):
     aspect_ratio: defaultAspectRatio as VideoConfigObject['aspect_ratio'],
     video_length: defaultVideoLength,
     resolution: defaultResolution as VideoConfigObject['resolution'],
-    generation_mode: template.videoConfigObject.generation_mode || remoteDefaults.generationMode,
-    quality_version: template.videoConfigObject.quality_version || remoteDefaults.qualityVersion,
-    model_version: template.videoConfigObject.model_version || remoteDefaults.modelVersion,
-    version: template.videoConfigObject.version || remoteDefaults.version,
+    generation_mode: resolvePreferredTopLevelOption(
+      mergedExtraParams,
+      ['generation_mode', 'mode'],
+      template.videoConfigObject.generation_mode,
+      remoteDefaults.generationMode,
+    ),
+    quality_version: resolvePreferredTopLevelOption(
+      mergedExtraParams,
+      ['quality_version'],
+      template.videoConfigObject.quality_version,
+      remoteDefaults.qualityVersion,
+    ),
+    model_version: resolvePreferredTopLevelOption(
+      mergedExtraParams,
+      ['model_version', 'model_variant'],
+      template.videoConfigObject.model_version,
+      remoteDefaults.modelVersion,
+    ),
+    version: resolvePreferredTopLevelOption(
+      mergedExtraParams,
+      ['version'],
+      template.videoConfigObject.version,
+      remoteDefaults.version,
+    ),
     off_peak:
       typeof template.videoConfigObject.off_peak === 'boolean'
         ? template.videoConfigObject.off_peak
@@ -556,18 +873,15 @@ function mergeRemoteModel(remote: LingkeRemoteApiVideoModel, imageUrl?: string):
     matchKeys: aliases,
     name: displayName,
     description:
-      template.description !== DEFAULT_TEMPLATE_DESCRIPTION
+      hasCuratedTemplate
         ? template.description
         : normalizeName(remote.description) || template.description,
-    features: {
-      ...template.features,
-      ...remoteFeatures,
-    },
+    features: mergedFeatures,
     aspectRatios: aspectRatios.length > 0 ? aspectRatios : template.aspectRatios,
     defaultAspectRatio,
     durations,
     defaultDuration,
-    videoConfigObject,
+    videoConfigObject: sanitizeLingkeVideoConfigObject(videoConfigObject) || videoConfigObject,
     imageUrl: imageUrl || template.imageUrl,
   };
 }
@@ -577,7 +891,7 @@ function buildVisibleImageMap(items: LingkeVisibleVideoModel[]): Map<string, str
   for (const item of items) {
     const displayName = normalizeName(item.展示名称);
     const imageUrl = normalizeName(item.模型图标);
-    if (!displayName || !imageUrl) continue;
+    if (!displayName || !imageUrl || isRetiredLingkeVideoModel(displayName)) continue;
     for (const alias of getLingkeVideoAliases(displayName)) {
       if (!map.has(alias.toLowerCase())) {
         map.set(alias.toLowerCase(), imageUrl);
@@ -629,33 +943,16 @@ export async function fetchLingkeSyncedVideoModelsForChannel(options: {
             .map((alias) => visibleImageMap.get(alias.toLowerCase()))
             .find(Boolean);
           return mergeRemoteModel(remote, imageUrl);
-        });
-
-      const coveredVisibleAliases = new Set(
-        syncedRemoteModels.flatMap((model) =>
-          getLingkeVideoAliases(model.apiModel, model.name, ...(model.matchKeys || []))
-            .map((alias) => alias.toLowerCase())
-        )
-      );
-
-      const visibleOnlyModels = visibleItems
-        .filter((item) => {
-          const aliases = getLingkeVideoAliases(normalizeName(item.展示名称));
-          return aliases.some((alias) => !coveredVisibleAliases.has(alias.toLowerCase()));
         })
-        .map((item) =>
-          createLingkeSyncedVideoModelFromName(
-            normalizeName(item.展示名称),
-            normalizeName(item.模型图标) || undefined,
-          )
-        );
+        .filter((item) => !isRetiredLingkeVideoModel(item.apiModel, item.name, ...(item.matchKeys || [])));
 
-      return [...syncedRemoteModels, ...visibleOnlyModels]
+      return syncedRemoteModels
         .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
     }
   }
 
   return visibleItems
     .map((item) => createLingkeSyncedVideoModelFromName(normalizeName(item.展示名称), normalizeName(item.模型图标) || undefined))
+    .filter((item) => !isRetiredLingkeVideoModel(item.apiModel, item.name, ...(item.matchKeys || [])))
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }

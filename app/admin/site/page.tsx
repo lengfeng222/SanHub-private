@@ -134,8 +134,6 @@ export default function SiteConfigPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          soraApiKey: config.soraApiKey,
-          soraBaseUrl: config.soraBaseUrl,
           siteConfig: config.siteConfig,
           videoProxyEnabled: config.videoProxyEnabled,
           videoProxyBaseUrl: config.videoProxyBaseUrl,
@@ -143,7 +141,10 @@ export default function SiteConfigPage() {
           promptProcessing: config.promptProcessing,
           registerEnabled: config.registerEnabled,
           defaultBalance: config.defaultBalance,
-          featureFlags: config.featureFlags,
+          featureFlags: {
+            squareEnabled: config.featureFlags.squareEnabled,
+            gachaEnabled: config.featureFlags.gachaEnabled,
+          },
           inviteSettings: config.inviteSettings,
           imageStorage: config.imageStorage,
           audioProvider: config.audioProvider,
@@ -298,46 +299,6 @@ export default function SiteConfigPage() {
         />
       </Card>
 
-      <Card icon={Shield} title="角色卡接口">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-2">
-            <p className="text-sm text-foreground/60">Base URL</p>
-            <input
-              value={config.soraBaseUrl}
-              onChange={(event) =>
-                patch((prev) => ({
-                  ...prev,
-                  soraBaseUrl: event.target.value,
-                }))
-              }
-              placeholder="https://your-sora-compatible-host"
-              className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-            />
-            <p className="text-xs text-foreground/35">
-              用于角色卡生成与搜索。支持填写主域名；如果误填了 /api 结尾，系统会自动兼容。
-            </p>
-          </div>
-          <div className="space-y-2">
-            <p className="text-sm text-foreground/60">API Key</p>
-            <input
-              type="password"
-              value={config.soraApiKey}
-              onChange={(event) =>
-                patch((prev) => ({
-                  ...prev,
-                  soraApiKey: event.target.value,
-                }))
-              }
-              placeholder="sk-..."
-              className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
-            />
-            <p className="text-xs text-foreground/35">
-              当前只影响角色卡，不影响你现有的视频模型渠道。
-            </p>
-          </div>
-        </div>
-      </Card>
-
       <Card icon={LayoutGrid} title="功能与邀请码">
         <div className="flex items-center justify-between rounded-xl border border-border/70 bg-card/50 p-4">
           <div>
@@ -376,26 +337,6 @@ export default function SiteConfigPage() {
               }))
             }
             color="bg-amber-500"
-          />
-        </div>
-
-        <div className="flex items-center justify-between rounded-xl border border-border/70 bg-card/50 p-4">
-          <div>
-            <p className="text-sm text-foreground">角色卡生成</p>
-            <p className="mt-1 text-xs text-foreground/30">关闭后隐藏导航入口，并拒绝新的角色卡生成请求。</p>
-          </div>
-          <Switch
-            checked={config.featureFlags.characterCardEnabled}
-            onClick={() =>
-              patch((prev) => ({
-                ...prev,
-                featureFlags: {
-                  ...prev.featureFlags,
-                  characterCardEnabled: !prev.featureFlags.characterCardEnabled,
-                },
-              }))
-            }
-            color="bg-indigo-500"
           />
         </div>
 

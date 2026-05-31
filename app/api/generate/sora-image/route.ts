@@ -9,6 +9,7 @@ import { fetchReferenceImage } from '@/lib/reference-image';
 import type { Generation } from '@/types';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
 import { saveMediaAsync } from '@/lib/media-storage';
+import { getBaseUrlFromRequest } from '@/lib/epay';
 
 export const maxDuration = 120;
 export const dynamic = 'force-dynamic';
@@ -71,7 +72,10 @@ async function processGenerationTask(
     if (!firstUrl) {
       throw new Error('图片生成失败：未返回有效的图片 URL');
     }
-    const savedUrl = await saveMediaAsync(generationId, firstUrl, { publicBaseUrl });
+    const savedUrl = await saveMediaAsync(generationId, firstUrl, {
+      publicBaseUrl,
+      storageMode: 'runtime',
+    });
 
     console.log(`[Task ${generationId}] 生成成功:`, savedUrl);
 
@@ -125,7 +129,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: SoraImageRequest = await request.json();
-    const origin = new URL(request.url).origin;
+    const origin = getBaseUrlFromRequest(request);
     const normalizedBody: SoraImageRequest = { ...body };
 
     if (body.referenceImageUrl && !body.input_image) {

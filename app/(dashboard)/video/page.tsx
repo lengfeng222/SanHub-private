@@ -1,7 +1,7 @@
 'use client';
 
-import VideoGenerationPage from '@/components/generator/video-generation-page';
+import { VideoToolPage } from '@/components/lc/tool-pages';
 
 export default function Page() {
-  return <VideoGenerationPage />;
+  return <VideoToolPage variant="supervideo" />;
 }

@@ -9,10 +9,9 @@ import {
   Loader2,
   AlertCircle,
   Dices,
-  User,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
+import { compressImageToWebP } from '@/lib/image-compression';
 import { toast } from '@/components/ui/toaster';
 import { CustomSelect } from '@/components/ui/select-custom';
 import { ModelPreview, getVideoModelPreviewMeta } from '@/components/model/model-preview';
@@ -20,7 +19,7 @@ import { InlineToggle } from '@/components/generator/inline-toggle';
 import { ReferenceImageInput } from '@/components/generator/reference-image-input';
 import type { Task } from '@/components/generator/result-gallery';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
-import type { Generation, CharacterCard, SafeVideoModel, DailyLimitConfig } from '@/types';
+import type { Generation, SafeVideoModel, DailyLimitConfig } from '@/types';
 import {
   buildTaskFromGeneration,
   deleteGenerationRecord,
@@ -39,6 +38,7 @@ import {
   type ReusableImageReference,
 } from '@/lib/generation-client';
 import { resolveVideoModelLabel } from '@/lib/video-model-label';
+import { uploadMediaFileToPublicUrl } from '@/lib/client-media-upload';
 
 const ResultGallery = dynamic(
   () => import('@/components/generator/result-gallery').then((mod) => mod.ResultGallery),
@@ -111,12 +111,6 @@ export function VideoGenerationView({
   const [keepPrompt, setKeepPrompt] = useState(false);
 
 
-  // 角色卡选择
-  const [characterCards, setCharacterCards] = useState<CharacterCard[]>([]);
-  const characterCardsLoadedRef = useRef(false);
-  const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const [showCharacterMenu, setShowCharacterMenu] = useState(false);
 
   const activeExternalReference =
     controlledExternalReference !== undefined
@@ -155,12 +149,12 @@ export function VideoGenerationView({
   const currentModel = useMemo(() => {
     return availableModels.find(m => m.id === selectedModelId) || availableModels[0];
   }, [availableModels, selectedModelId]);
+  const effectiveModelId = currentModel?.id || selectedModelId;
+  const hasConfiguredModel = Boolean(effectiveModelId);
   const videoModelMap = useMemo(
     () => new Map(availableModels.map((item) => [item.id, item.name])),
     [availableModels]
   );
-  const isSoraChannel = currentModel?.channelType === 'sora';
-  const canMentionCharacterCards = isSoraChannel && characterCards.length > 0;
 
   const modelsCacheRef = useRef<SafeVideoModel[] | null>(null);
 
@@ -242,35 +236,23 @@ export function VideoGenerationView({
     }
   }, [selectedModelId, availableModels, activeExternalReference, clearFiles, files.length, setActiveExternalReference]);
 
-  // Load character cards only when the active model can use Sora mentions.
   useEffect(() => {
-    if (!isActive || !isSoraChannel || characterCardsLoadedRef.current) {
+    if (!availableModels.length) {
+      if (selectedModelId) {
+        setSelectedModelId('');
+      }
       return;
     }
 
-    const loadCharacterCards = async () => {
-      try {
-        const res = await fetch('/api/user/character-cards');
-        if (res.ok) {
-          const data = await res.json();
-          const completedCards = (data.data || []).filter(
-            (c: CharacterCard) => c.status === 'completed' && c.characterName
-          );
-          setCharacterCards(completedCards);
-          characterCardsLoadedRef.current = true;
-        }
-      } catch (err) {
-        console.error('Failed to load character cards:', err);
-      }
-    };
-    void loadCharacterCards();
-  }, [isActive, isSoraChannel]);
-
-  useEffect(() => {
-    if (!isSoraChannel) {
-      setShowCharacterMenu(false);
+    if (selectedModelId && availableModels.some((model) => model.id === selectedModelId)) {
+      return;
     }
-  }, [isSoraChannel]);
+
+    const fallbackModel = currentModel || availableModels[0];
+    if (fallbackModel?.id && fallbackModel.id !== selectedModelId) {
+      setSelectedModelId(fallbackModel.id);
+    }
+  }, [availableModels, currentModel, selectedModelId]);
 
   useEffect(() => {
     if (!activeExternalReference) return;
@@ -294,14 +276,6 @@ export function VideoGenerationView({
     setter: (value: string) => void
   ) => {
     setter(e.target.value);
-  };
-
-  const handleAddCharacter = (characterName: string) => {
-    if (!isSoraChannel) return;
-    const mention = `@${characterName}`;
-    setPrompt((prev) => (prev ? `${prev} ${mention}` : mention));
-    promptTextareaRef.current?.focus();
-    setShowCharacterMenu(false);
   };
 
   const handleAddReferenceFiles = useCallback(
@@ -351,24 +325,6 @@ export function VideoGenerationView({
       return prev.filter((_, itemIndex) => itemIndex !== index);
     });
   }, []);
-
-
-  const handlePromptKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!canMentionCharacterCards) {
-      if (showCharacterMenu) {
-        setShowCharacterMenu(false);
-      }
-      return;
-    }
-
-    const value = (e.target as HTMLTextAreaElement).value;
-    const lastChar = value.slice(-1);
-    if (lastChar === '@') {
-      setShowCharacterMenu(true);
-    } else if (e.key === 'Escape') {
-      setShowCharacterMenu(false);
-    }
-  };
 
   const loadRecentGenerations = useCallback(async () => {
     try {
@@ -722,7 +678,7 @@ export function VideoGenerationView({
     return prompt.trim();
   };
 
-  // 压缩并构建 files 数组
+  // 压缩并上传到服务器公网 URL，避免把 data:base64 直接提交给上游
   const compressFilesIfNeeded = async (): Promise<{ mimeType: string; data: string }[]> => {
     if (files.length === 0 || !currentModel?.features.imageToVideo) {
       return [];
@@ -734,29 +690,29 @@ export function VideoGenerationView({
 
     try {
       for (const { file } of files) {
-        // Check cache first
-        const cached = nextCache.get(file);
-        if (cached) {
+        const cachedUrl = nextCache.get(file);
+        if (cachedUrl) {
           results.push({
-            mimeType: 'image/webp',
-            data: cached,
+            mimeType: file.type || 'image/jpeg',
+            data: cachedUrl,
           });
           continue;
         }
 
         try {
           const compressedFile = await compressImageToWebP(file);
-          const base64 = await fileToBase64(compressedFile);
-          nextCache.set(file, base64);
+          const uploaded = await uploadMediaFileToPublicUrl(compressedFile);
+          nextCache.set(file, uploaded.url);
           results.push({
-            mimeType: 'image/webp',
-            data: base64,
+            mimeType: uploaded.mimeType || compressedFile.type || 'image/jpeg',
+            data: uploaded.url,
           });
         } catch {
-          const base64 = await fileToBase64(file);
+          const uploaded = await uploadMediaFileToPublicUrl(file);
+          nextCache.set(file, uploaded.url);
           results.push({
-            mimeType: file.type || 'image/jpeg',
-            data: base64,
+            mimeType: uploaded.mimeType || file.type || 'image/jpeg',
+            data: uploaded.url,
           });
         }
       }
@@ -864,7 +820,11 @@ export function VideoGenerationView({
       // 处理图片压缩
       const taskFiles = await compressFilesIfNeeded();
 
-      await submitSingleTask(taskPrompt, selectedModelId, {
+      if (!effectiveModelId) {
+        throw new Error('请先选择一个可用模型');
+      }
+
+      await submitSingleTask(taskPrompt, effectiveModelId, {
         aspectRatio,
         duration,
         files: taskFiles,
@@ -913,9 +873,13 @@ export function VideoGenerationView({
     try {
       // 处理图片压缩 (只执行一次)
       const taskFiles = await compressFilesIfNeeded();
+      if (!effectiveModelId) {
+        throw new Error('请先选择一个可用模型');
+      }
+
       const results = await Promise.allSettled(
         Array.from({ length: 3 }, () =>
-          submitSingleTask(taskPrompt, selectedModelId, {
+          submitSingleTask(taskPrompt, effectiveModelId, {
             aspectRatio,
             duration,
             files: taskFiles,
@@ -1058,46 +1022,11 @@ export function VideoGenerationView({
             {/* 文本输入区 */}
             <div className="flex-1 relative">
               <textarea
-                ref={promptTextareaRef}
                 value={prompt}
                 onChange={(e) => handlePromptChange(e, setPrompt)}
-                onKeyUp={canMentionCharacterCards ? handlePromptKeyUp : undefined}
-                placeholder={isSoraChannel ? '描述视频动态，或拖入图片生成图生视频... 输入 @ 引用角色卡' : '描述视频动态，或拖入图片生成图生视频...'}
+                placeholder="描述视频动态，或拖入图片生成图生视频..."
                 className="w-full h-20 px-3 py-2 bg-input/70 border border-border/70 text-foreground rounded-lg resize-none text-sm focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30"
               />
-
-              {/* @ 触发的角色卡弹出菜单，仅 sora 渠道显示 */}
-              {isSoraChannel && showCharacterMenu && characterCards.length > 0 && (
-                <div className="absolute bottom-full left-0 mb-2 w-64 max-h-48 overflow-auto bg-card border border-border/70 rounded-lg shadow-lg z-20">
-                  <div className="p-2 border-b border-border/70 text-xs text-foreground/50">选择角色卡</div>
-                  {characterCards.map((card) => (
-                    <button
-                      key={card.id}
-                      onClick={() => handleAddCharacter(card.characterName)}
-                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-card/80 transition-colors text-left"
-                    >
-                      <div className="w-6 h-6 rounded-full overflow-hidden bg-gradient-to-br from-emerald-500/20 to-sky-500/20 shrink-0">
-                        {card.avatarUrl ? (
-                          <img
-                            src={card.avatarUrl}
-                            alt=""
-                            className="w-full h-full object-cover"
-                            loading="lazy"
-                            decoding="async"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <User className="w-3 h-3 text-emerald-300/60" />
-                          </div>
-                        )}
-                      </div>
-                      <span className="text-sm text-foreground">@{card.characterName}</span>
-                    </button>
-                  ))}
-                  <button onClick={() => setShowCharacterMenu(false)} className="w-full px-3 py-2 text-xs text-foreground/50 hover:bg-card/80 border-t border-border/70">关闭</button>
-                </div>
-              )}
-
             </div>
           </div>
 
@@ -1178,10 +1107,10 @@ export function VideoGenerationView({
             {siteConfig.gachaEnabled && (
               <button
                 onClick={handleGachaMode}
-                disabled={submitting || compressing || hasChinese}
+                disabled={!hasConfiguredModel || submitting || compressing || hasChinese}
                 className={cn(
                   'inline-flex h-9 items-center gap-2 rounded-full border px-3.5 text-xs font-medium transition-all',
-                  submitting || compressing || hasChinese
+                  !hasConfiguredModel || submitting || compressing || hasChinese
                     ? 'cursor-not-allowed border-border/70 bg-card/50 text-foreground/40'
                     : 'border-amber-500/30 bg-amber-500/12 text-amber-200 hover:bg-amber-500/18'
                 )}
@@ -1195,10 +1124,10 @@ export function VideoGenerationView({
             {/* 生成按钮 */}
             <button
               onClick={handleGenerate}
-              disabled={submitting || compressing || hasChinese}
+              disabled={!hasConfiguredModel || submitting || compressing || hasChinese}
               className={cn(
                 'flex items-center gap-2 px-5 py-2 rounded-lg font-medium text-sm transition-all',
-                submitting || compressing || hasChinese
+                !hasConfiguredModel || submitting || compressing || hasChinese
                   ? 'bg-card/60 text-foreground/40 cursor-not-allowed'
                   : 'bg-gradient-to-r from-sky-500 to-emerald-500 text-white hover:opacity-90'
               )}
@@ -1206,7 +1135,7 @@ export function VideoGenerationView({
               {submitting || compressing ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{compressing ? '处理图片中...' : '提交中...'}</span>
+                  <span>{compressing ? '上传图片中...' : '提交中...'}</span>
                 </>
               ) : (
                 <>

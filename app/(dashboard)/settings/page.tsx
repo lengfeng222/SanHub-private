@@ -359,7 +359,13 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
-        <div className="p-6 space-y-5">
+        <form
+          className="p-6 space-y-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleChangePassword();
+          }}
+        >
           <div className="space-y-2">
             <label className="text-sm text-foreground/50 uppercase tracking-wider">当前密码</label>
             <input
@@ -367,6 +373,7 @@ export default function SettingsPage() {
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="输入当前密码"
+              autoComplete="current-password"
               className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-xl text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors"
             />
           </div>
@@ -377,6 +384,7 @@ export default function SettingsPage() {
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder="至少 6 个字符"
+              autoComplete="new-password"
               className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-xl text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors"
             />
           </div>
@@ -387,11 +395,12 @@ export default function SettingsPage() {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="再次输入新密码"
+              autoComplete="new-password"
               className="w-full px-4 py-3 bg-input/70 border border-border/70 rounded-xl text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors"
             />
           </div>
           <button
-            onClick={handleChangePassword}
+            type="submit"
             disabled={loading}
             className="flex items-center gap-2 px-6 py-3 bg-foreground text-background rounded-xl font-medium hover:opacity-90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -401,7 +410,7 @@ export default function SettingsPage() {
               <><Check className="w-4 h-4" /> 保存密码</>
             )}
           </button>
-        </div>
+        </form>
       </div>
 
       {/* Logout Card */}

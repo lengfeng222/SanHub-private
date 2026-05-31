@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getPendingGenerations } from '@/lib/db';
+import { shouldHideGenerationFromUserFeeds } from '@/lib/generation-visibility';
 import type { Generation } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -18,7 +19,8 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const rawLimit = parseInt(searchParams.get('limit') || '50');
     const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 1), 200);
-    const tasks = await getPendingGenerations(session.user.id, limit);
+    const tasks = (await getPendingGenerations(session.user.id, limit))
+      .filter((task) => !shouldHideGenerationFromUserFeeds(task));
 
     return NextResponse.json({
       data: tasks.map((t: Generation) => ({

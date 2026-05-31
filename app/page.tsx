@@ -4,8 +4,6 @@ import {
   Compass,
   Image as ImageIcon,
   ShieldAlert,
-  Mic,
-  Music,
   Video,
 } from 'lucide-react';
 import { AnimatedBackground } from '@/components/ui/animated-background';
@@ -24,18 +22,6 @@ const features = [
     description: 'AI 视频生成',
     icon: Video,
     iconClass: 'text-sky-300',
-  },
-  {
-    label: '音乐',
-    description: 'AI 音乐生成',
-    icon: Music,
-    iconClass: 'text-violet-300',
-  },
-  {
-    label: '语音',
-    description: 'AI 语音生成',
-    icon: Mic,
-    iconClass: 'text-yellow-300',
   },
 ];
 
@@ -67,7 +53,7 @@ export default async function LandingPage() {
               </div>
 
               <h2 className="mt-10 max-w-3xl text-balance text-[1.5rem] font-light leading-snug tracking-[-0.03em] text-white/88 md:text-[1.95rem]">
-                把灵感，变成图像、视频、声音与叙事的完整作品。
+                把灵感，变成图像与视频的完整作品。
               </h2>
 
               <p className="mt-5 max-w-2xl text-balance text-[1rem] font-light leading-relaxed text-white/52 md:text-[1.08rem]">

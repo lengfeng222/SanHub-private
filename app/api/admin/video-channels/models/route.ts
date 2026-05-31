@@ -29,7 +29,7 @@ type RemoteModel = {
   [key: string]: unknown;
 };
 
-type VideoCategory = 't2v' | 'i2v' | 'r2v' | 'interpolation' | 'upsample';
+type VideoCategory = 't2v' | 'i2v' | 'r2v' | 'interpolation' | 'v2v' | 'upsample';
 
 type ClassifiedVideoModel = {
   apiModel: string;
@@ -67,7 +67,8 @@ const CATEGORY_ORDER: Record<VideoCategory, number> = {
   i2v: 2,
   r2v: 3,
   interpolation: 4,
-  upsample: 5,
+  v2v: 5,
+  upsample: 6,
 };
 
 const CATEGORY_LABELS: Record<VideoCategory, string> = {
@@ -75,6 +76,7 @@ const CATEGORY_LABELS: Record<VideoCategory, string> = {
   i2v: '图生视频',
   r2v: '多图视频',
   interpolation: '首尾帧视频',
+  v2v: '视频参考/编辑',
   upsample: '视频放大',
 };
 
@@ -83,6 +85,7 @@ const CATEGORY_DESCRIPTION: Record<VideoCategory, string> = {
   i2v: '支持 1-2 张图片（首帧/首尾帧）',
   r2v: '支持多张参考图片',
   interpolation: '支持首尾帧插帧生成',
+  v2v: '支持参考视频、续写或视频编辑',
   upsample: '用于视频放大输出',
 };
 
@@ -306,20 +309,31 @@ function classifyApexerApiModel(model: RemoteModel): ClassifiedVideoModel | null
 
 
 function mapLingkeModelToClassified(model: LingkeSyncedVideoModel): ClassifiedVideoModel {
+  const uploadMode = String(model.videoConfigObject?.extra_params?.upload_mode || '').trim().toLowerCase();
+  const isVideoReferenceFamily =
+    uploadMode === 'video_reference' ||
+    uploadMode === 'video_continue' ||
+    uploadMode === 'video_edit' ||
+    model.features.videoToVideo;
+
   return {
     apiModel: model.apiModel,
     matchKeys: model.matchKeys,
     name: model.name,
     description: model.description,
-    category: model.features.videoToVideo
-      ? 'upsample'
+    category: isVideoReferenceFamily
+      ? 'v2v'
       : model.videoConfigObject?.extra_params?.upload_mode === 'first_last_frame'
         ? 'interpolation'
         : model.features.imageToVideo
           ? 'i2v'
           : 't2v',
-    categoryLabel: model.features.videoToVideo
-      ? '视频编辑'
+    categoryLabel: isVideoReferenceFamily
+      ? uploadMode === 'video_continue'
+        ? '视频续写'
+        : uploadMode === 'video_edit'
+          ? '视频编辑'
+          : '视频参考'
       : model.videoConfigObject?.extra_params?.upload_mode === 'first_last_frame'
         ? '首尾帧视频'
         : model.features.imageToVideo

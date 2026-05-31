@@ -2,6 +2,8 @@
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getImageChannel } from '@/lib/db';
+import { fetchLingkeSyncedImageModelsForChannel } from '@/lib/lingke-image-sync';
+import type { ImageModelFeatures } from '@/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -94,11 +96,14 @@ interface GroupedModel {
   aspectRatios: string[];
   imageSizes: string[];
   resolutions: Record<string, string | Record<string, string>>;
-  features: {
-    textToImage: boolean;
-    imageToImage: boolean;
-    imageSize: boolean;
-  };
+  features: ImageModelFeatures;
+  imageUrl?: string;
+  requiresReferenceImage?: boolean;
+  allowEmptyPrompt?: boolean;
+  billingMode?: 'per_call' | 'per_second';
+  billingPrice?: number;
+  billingUnit?: number;
+  costPerGeneration?: number;
 }
 
 const RATIO_ORDER = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '4:5', '5:4', '21:9', '4:1', '8:1', '1:4', '1:8'];
@@ -178,6 +183,9 @@ function groupModels(models: RemoteModel[]): { grouped: GroupedModel[]; ungroupe
         features: {
           textToImage: true,
           imageToImage: true,
+          upscale: false,
+          matting: false,
+          multipleImages: false,
           imageSize: false,
         },
       };
@@ -296,11 +304,59 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Channel has no baseUrl configured' }, { status: 400 });
     }
 
-    if (channel.type !== 'apexerapi' && channel.type !== 'openai-chat' && channel.type !== 'openai-compatible') {
+    if (
+      channel.type !== 'apexerapi' &&
+      channel.type !== 'openai-chat' &&
+      channel.type !== 'openai-compatible' &&
+      channel.type !== 'lingke-media'
+    ) {
       return NextResponse.json(
         { error: 'This channel type does not support fetching remote models' },
         { status: 400 }
       );
+    }
+
+    if (channel.type === 'lingke-media') {
+      const grouped = await fetchLingkeSyncedImageModelsForChannel({
+        baseUrl: channel.baseUrl,
+        apiKey: channel.apiKey,
+      });
+
+      return NextResponse.json({
+        success: true,
+        data: {
+          grouped: grouped.map((model) => ({
+            baseName: model.apiModel,
+            displayName: model.name,
+            apiModel: model.apiModel,
+            modelIds: [model.apiModel],
+            sourceModelIds: model.matchKeys || [model.apiModel],
+            modelCount: 1,
+            recommendedName: model.name,
+            recommendedDescription: model.description,
+            tags: [
+              model.features.textToImage ? '文生图' : null,
+              model.features.imageToImage ? '图生图' : null,
+              model.features.multipleImages ? '多图参考' : null,
+              model.features.imageSize && model.imageSizes?.length
+                ? `分档 ${model.imageSizes.join('/')}`
+                : null,
+            ].filter((item): item is string => Boolean(item)),
+            aspectRatios: model.aspectRatios,
+            imageSizes: model.imageSizes || [],
+            resolutions: model.resolutions,
+            features: model.features,
+            imageUrl: model.imageUrl,
+            requiresReferenceImage: model.requiresReferenceImage,
+            allowEmptyPrompt: model.allowEmptyPrompt,
+            billingMode: model.billingMode,
+            billingPrice: model.billingPrice,
+            billingUnit: model.billingUnit,
+            costPerGeneration: model.costPerGeneration,
+          })),
+          ungrouped: [],
+        },
+      });
     }
 
     const baseUrl = channel.baseUrl.replace(/\/$/, '');

@@ -39,7 +39,7 @@ type RemoteFlow2ApiModel = {
   id: string;
   displayName: string;
   description: string;
-  category: 't2v' | 'i2v' | 'r2v' | 'interpolation' | 'upsample';
+  category: 't2v' | 'i2v' | 'r2v' | 'interpolation' | 'v2v' | 'upsample';
   categoryLabel: string;
   defaultAspectRatio: string;
   defaultDuration: string;
@@ -367,7 +367,7 @@ function buildManualTemplateModelPayload(channel: VideoChannel): ModelFormState 
     return {
       name: `${channel.name} 默认模型`,
       description: '适合灵刻 AI /v1/media/generate 的异步视频模型',
-      apiModel: 'veo3.1-lite',
+      apiModel: 'veo3.1',
       baseUrl: '',
       apiKey: '',
       features: {

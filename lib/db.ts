@@ -6,6 +6,8 @@ import { createDatabaseAdapter, type DatabaseAdapter } from './db-adapter';
 import { cache, CacheKeys, CacheTTL, withCache } from './cache';
 import { buildSafeVideoModels } from './video-model-normalizer';
 import { normalizeBillingMode } from './billing';
+import { deleteMediaFile, deletePublicRuntimeMediaByUrl } from './media-storage';
+import { sanitizeLingkeVideoModelConfig } from './lingke-video-config';
 
 // ========================================
 // 数据库连接（支持 SQLite �?MySQL�?
@@ -1128,7 +1130,7 @@ export async function getGenerationByClientRequestId(
   );
 
   for (const row of rows as any[]) {
-    const params = typeof row.params === 'string' ? JSON.parse(row.params) : row.params;
+    const params = safeParseJsonObject(row.params);
     if (params?.clientRequestId !== clientRequestId) {
       continue;
     }
@@ -1303,7 +1305,7 @@ export async function getUserGenerations(
     userId: row.user_id,
     type: row.type,
     prompt: row.prompt,
-    params: typeof row.params === 'string' ? JSON.parse(row.params) : row.params,
+    params: safeParseJsonObject(row.params),
     resultUrl: row.result_url,
     cost: row.cost,
     status: row.status || 'completed',
@@ -1331,7 +1333,7 @@ export async function getPendingGenerations(userId: string, limit = 50): Promise
     userId: row.user_id,
     type: row.type,
     prompt: row.prompt,
-    params: typeof row.params === 'string' ? JSON.parse(row.params) : row.params,
+    params: safeParseJsonObject(row.params),
     resultUrl: row.result_url,
     cost: row.cost,
     status: row.status,
@@ -1388,7 +1390,7 @@ export async function getRecentSoraVideoGenerationsByUser(
     userId: row.user_id,
     type: row.type,
     prompt: row.prompt,
-    params: typeof row.params === 'string' ? JSON.parse(row.params) : row.params,
+    params: safeParseJsonObject(row.params),
     resultUrl: row.result_url,
     cost: row.cost,
     status: row.status || 'completed',
@@ -1416,7 +1418,7 @@ export async function getRecentSoraVideoGenerations(limit = 20): Promise<Generat
     userId: row.user_id,
     type: row.type,
     prompt: row.prompt,
-    params: typeof row.params === 'string' ? JSON.parse(row.params) : row.params,
+    params: safeParseJsonObject(row.params),
     resultUrl: row.result_url,
     cost: row.cost,
     status: row.status || 'completed',
@@ -1442,7 +1444,7 @@ export async function getGeneration(id: string): Promise<Generation | null> {
     userId: row.user_id,
     type: row.type,
     prompt: row.prompt,
-    params: typeof row.params === 'string' ? JSON.parse(row.params) : row.params,
+    params: safeParseJsonObject(row.params),
     resultUrl: row.result_url,
     cost: row.cost,
     status: row.status || 'completed',
@@ -1459,12 +1461,26 @@ export async function deleteGeneration(id: string, userId: string): Promise<bool
   await initializeDatabase();
   const db = getAdapter();
 
+  const [existingRows] = await db.execute(
+    'SELECT result_url FROM generations WHERE id = ? AND user_id = ?',
+    [id, userId]
+  );
+  const resultUrl = String((existingRows as any[])[0]?.result_url || '');
+
   const [result] = await db.execute(
     'DELETE FROM generations WHERE id = ? AND user_id = ?',
     [id, userId]
   );
 
-  return (result as any).affectedRows > 0;
+  const deleted = (result as any).affectedRows > 0;
+  if (deleted && resultUrl) {
+    deleteMediaFile(resultUrl);
+    await deletePublicRuntimeMediaByUrl(resultUrl).catch((error) => {
+      console.warn('[DB] 删除运行时媒体失败:', error);
+    });
+  }
+
+  return deleted;
 }
 
 // 批量删除生成记录
@@ -1475,12 +1491,28 @@ export async function deleteGenerations(ids: string[], userId: string): Promise<
   const db = getAdapter();
 
   const placeholders = ids.map(() => '?').join(',');
+  const [existingRows] = await db.execute(
+    `SELECT result_url FROM generations WHERE id IN (${placeholders}) AND user_id = ?`,
+    [...ids, userId]
+  );
   const [result] = await db.execute(
     `DELETE FROM generations WHERE id IN (${placeholders}) AND user_id = ?`,
     [...ids, userId]
   );
 
-  return (result as any).affectedRows || 0;
+  const deletedCount = (result as any).affectedRows || 0;
+  if (deletedCount > 0) {
+    for (const row of existingRows as any[]) {
+      const resultUrl = String(row?.result_url || '');
+      if (!resultUrl) continue;
+      deleteMediaFile(resultUrl);
+      await deletePublicRuntimeMediaByUrl(resultUrl).catch((error) => {
+        console.warn('[DB] 批量删除运行时媒体失败:', error);
+      });
+    }
+  }
+
+  return deletedCount;
 }
 
 // 清空用户所有生成记录
@@ -1488,12 +1520,29 @@ export async function deleteAllUserGenerations(userId: string): Promise<number> 
   await initializeDatabase();
   const db = getAdapter();
 
+  const [existingRows] = await db.execute(
+    `SELECT result_url FROM generations WHERE user_id = ?`,
+    [userId]
+  );
+
   const [result] = await db.execute(
     `DELETE FROM generations WHERE user_id = ?`,
     [userId]
   );
 
-  return (result as any).affectedRows || 0;
+  const deletedCount = (result as any).affectedRows || 0;
+  if (deletedCount > 0) {
+    for (const row of existingRows as any[]) {
+      const resultUrl = String(row?.result_url || '');
+      if (!resultUrl) continue;
+      deleteMediaFile(resultUrl);
+      await deletePublicRuntimeMediaByUrl(resultUrl).catch((error) => {
+        console.warn('[DB] 清空用户媒体失败:', error);
+      });
+    }
+  }
+
+  return deletedCount;
 }
 
 // 清空用户所有失败的生成记录
@@ -1501,12 +1550,29 @@ export async function deleteAllFailedGenerations(userId: string): Promise<number
   await initializeDatabase();
   const db = getAdapter();
 
+  const [existingRows] = await db.execute(
+    `SELECT result_url FROM generations WHERE user_id = ? AND status IN ('failed', 'cancelled')`,
+    [userId]
+  );
+
   const [result] = await db.execute(
     `DELETE FROM generations WHERE user_id = ? AND status IN ('failed', 'cancelled')`,
     [userId]
   );
 
-  return (result as any).affectedRows || 0;
+  const deletedCount = (result as any).affectedRows || 0;
+  if (deletedCount > 0) {
+    for (const row of existingRows as any[]) {
+      const resultUrl = String(row?.result_url || '');
+      if (!resultUrl) continue;
+      deleteMediaFile(resultUrl);
+      await deletePublicRuntimeMediaByUrl(resultUrl).catch((error) => {
+        console.warn('[DB] 清空失败媒体失败:', error);
+      });
+    }
+  }
+
+  return deletedCount;
 }
 
 // 获取用户今日使用量统计
@@ -1595,6 +1661,34 @@ function sanitizeImageBucket(
     forcePathStyle: bucket.forcePathStyle !== false,
     enabled: bucket.enabled !== false,
   };
+}
+
+function safeParseJsonObject(raw: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
+  if (raw == null) return fallback;
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== 'string') return fallback;
+
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeParseJsonArray(raw: unknown): unknown[] {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string') return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseImageStorageBuckets(raw: unknown): ImageBucketConfig[] {
@@ -1727,7 +1821,6 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         featureFlags: {
           squareEnabled: true,
           gachaEnabled: true,
-          characterCardEnabled: true,
         },
         inviteSettings: {
           enabled: true,
@@ -1755,8 +1848,8 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         siteConfig: {
           siteName: '幻途',
           siteTagline: '幻途 AI 内容创作平台',
-          siteDescription: '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
-          siteSubDescription: '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+          siteDescription: '幻途，专注图像与视频生成的 AI 创作平台。',
+          siteSubDescription: '支持文生图、参考图生成、文生视频、图生视频与 24 小时站内缓存，让你更快完成从灵感到成片的创作流程。',
           contactEmail: 'support@aigcone.cn',
           copyright: '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
           poweredBy: '幻途 · Huantu AI',
@@ -1852,7 +1945,6 @@ export async function getSystemConfig(): Promise<SystemConfig> {
       featureFlags: {
         squareEnabled: row.square_enabled !== 0,
         gachaEnabled: row.gacha_enabled !== 0,
-        characterCardEnabled: row.character_card_enabled !== 0,
       },
       inviteSettings: {
         enabled: row.invite_enabled !== 0,
@@ -1880,15 +1972,15 @@ export async function getSystemConfig(): Promise<SystemConfig> {
       siteConfig: {
         siteName: row.site_name || '幻途',
         siteTagline: row.site_tagline || '幻途 AI 内容创作平台',
-        siteDescription: row.site_description || '幻途，连接图像、视频、音乐、语音与多模型对话的一体化 AI 创作平台。',
-        siteSubDescription: row.site_sub_description || '在这里，你可以把灵感快速转成可见、可听、可传播的内容作品，用更低门槛完成从想法到产出的全过程。',
+        siteDescription: row.site_description || '幻途，专注图像与视频生成的 AI 创作平台。',
+        siteSubDescription: row.site_sub_description || '支持文生图、参考图生成、文生视频、图生视频与 24 小时站内缓存，让你更快完成从灵感到成片的创作流程。',
         contactEmail: row.contact_email || 'support@aigcone.cn',
         copyright: row.site_copyright || '本平台仅提供内容生成工具服务，不对产出内容真实性、合规性、版权归属承担相关责任。',
         poweredBy: row.site_powered_by || '幻途 · Huantu AI',
       },
       disabledModels: {
-        imageModels: row.disabled_image_models ? JSON.parse(row.disabled_image_models) : [],
-        videoModels: row.disabled_video_models ? JSON.parse(row.disabled_video_models) : [],
+        imageModels: safeParseJsonArray(row.disabled_image_models) as string[],
+        videoModels: safeParseJsonArray(row.disabled_video_models) as string[],
       },
       videoProxyEnabled: Boolean(row.video_proxy_enabled),
       videoProxyBaseUrl: row.video_proxy_base_url || '',
@@ -2102,10 +2194,6 @@ export async function updateSystemConfig(
     if (featureFlags.gachaEnabled !== undefined) {
       fields.push('gacha_enabled = ?');
       values.push(featureFlags.gachaEnabled ? 1 : 0);
-    }
-    if (featureFlags.characterCardEnabled !== undefined) {
-      fields.push('character_card_enabled = ?');
-      values.push(featureFlags.characterCardEnabled ? 1 : 0);
     }
   }
   if (updates.inviteSettings) {
@@ -3882,34 +3970,36 @@ export async function getVideoModels(enabledOnly = false): Promise<VideoModel[]>
 
   const [rows] = await db.execute(sql);
 
-  return (rows as any[]).map((row) => ({
-    id: row.id,
-    channelId: row.channel_id,
-    name: row.name,
-    description: row.description || '',
-    apiModel: row.api_model,
-    baseUrl: row.base_url || undefined,
-    apiKey: row.api_key || undefined,
-    features: parseVideoFeatures(row.features),
-    aspectRatios: parseAspectRatios(row.aspect_ratios),
-    durations: parseDurations(row.durations),
-    defaultAspectRatio: row.default_aspect_ratio || 'landscape',
-    defaultDuration: row.default_duration || '8s',
-    videoConfigObject: parseVideoConfigObject(row.video_config_object),
-    highlight: Boolean(row.highlight),
-    enabled: Boolean(row.enabled),
-    billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
-    billingPrice: Number(row.billing_price) || 12,
-    billingUnit: Number(row.billing_unit) || 1,
-    normalPrice: Number(row.normal_price) || undefined,
-    vipPrice: Number(row.vip_price) || undefined,
-    svipPrice: Number(row.svip_price) || undefined,
-    pricingRules: parsePricingRules(row.pricing_rules),
-    imageUrl: row.image_url || undefined,
-    sortOrder: row.sort_order || 0,
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
-  }));
+  return (rows as any[]).map((row) =>
+    sanitizeLingkeVideoModelConfig({
+      id: row.id,
+      channelId: row.channel_id,
+      name: row.name,
+      description: row.description || '',
+      apiModel: row.api_model,
+      baseUrl: row.base_url || undefined,
+      apiKey: row.api_key || undefined,
+      features: parseVideoFeatures(row.features),
+      aspectRatios: parseAspectRatios(row.aspect_ratios),
+      durations: parseDurations(row.durations),
+      defaultAspectRatio: row.default_aspect_ratio || 'landscape',
+      defaultDuration: row.default_duration || '8s',
+      videoConfigObject: parseVideoConfigObject(row.video_config_object),
+      highlight: Boolean(row.highlight),
+      enabled: Boolean(row.enabled),
+      billingMode: normalizeBillingMode(row.billing_mode, 'per_second'),
+      billingPrice: Number(row.billing_price) || 12,
+      billingUnit: Number(row.billing_unit) || 1,
+      normalPrice: Number(row.normal_price) || undefined,
+      vipPrice: Number(row.vip_price) || undefined,
+      svipPrice: Number(row.svip_price) || undefined,
+      pricingRules: parsePricingRules(row.pricing_rules),
+      imageUrl: row.image_url || undefined,
+      sortOrder: row.sort_order || 0,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    })
+  );
 }
 
 // 获取单个视频模型
@@ -3923,7 +4013,7 @@ export async function getVideoModel(id: string): Promise<VideoModel | null> {
   if (models.length === 0) return null;
 
   const row = models[0];
-  return {
+  return sanitizeLingkeVideoModelConfig({
     id: row.id,
     channelId: row.channel_id,
     name: row.name,
@@ -3950,7 +4040,7 @@ export async function getVideoModel(id: string): Promise<VideoModel | null> {
     sortOrder: row.sort_order || 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
-  };
+  });
 }
 
 // 创建视频模型

@@ -15,25 +15,24 @@ import {
   Play,
   Square,
   Trash2,
-  User,
   Video,
   X,
 } from 'lucide-react';
-import type { CharacterCard, Generation, SafeVideoModel } from '@/types';
+import type { Generation, SafeVideoModel } from '@/types';
 import { resolveVideoModelLabel } from '@/lib/video-model-label';
 import { cn } from '@/lib/utils';
 import { downloadAsset } from '@/lib/download';
 import { deleteGenerationRecords } from '@/lib/generation-client';
+import { inferDisplayMediaKind } from '@/lib/media-kind';
 
-type HistoryTabKey = 'all' | 'video' | 'image' | 'audio' | 'character';
-type HistoryEntry = Generation & { source: 'generation' | 'character-card' };
+type HistoryTabKey = 'all' | 'video' | 'image' | 'audio';
+type HistoryEntry = Generation & { source: 'generation' };
 
 const tabs: Array<{ key: HistoryTabKey; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'video', label: '视频' },
   { key: 'image', label: '图像' },
   { key: 'audio', label: '音频' },
-  { key: 'character', label: '角色卡' },
 ];
 
 const statusLabelMap: Record<Generation['status'], string> = {
@@ -56,15 +55,10 @@ function isAudioItem(item: HistoryEntry) {
   return item.type === 'music' || item.type === 'voice';
 }
 
-function isCharacterItem(item: HistoryEntry) {
-  return item.type === 'character-card';
-}
-
 function getTypeLabel(item: HistoryEntry) {
   if (isVideoItem(item)) return '视频';
   if (isImageItem(item)) return '图像';
   if (isAudioItem(item)) return '音频';
-  if (isCharacterItem(item)) return '角色卡';
   return item.type;
 }
 
@@ -83,34 +77,15 @@ function getStatusBadgeClass(status: Generation['status']) {
   }
 }
 
-function characterCardToEntry(card: CharacterCard): HistoryEntry {
-  return {
-    id: card.id,
-    userId: card.userId,
-    type: 'character-card',
-    prompt: card.characterName || '角色卡',
-    params: {
-      model: '角色卡',
-      sourceVideoUrl: card.sourceVideoUrl,
-    } as Generation['params'],
-    resultUrl: card.avatarUrl || '',
-    cost: 0,
-    status: card.status,
-    errorMessage: card.errorMessage,
-    createdAt: card.createdAt,
-    updatedAt: card.updatedAt,
-    source: 'character-card',
-  };
-}
-
 function getDownloadExtension(item: HistoryEntry) {
-  if (isAudioItem(item)) {
+  const mediaKind = inferDisplayMediaKind(item);
+  if (mediaKind === 'audio') {
     if (typeof item.params?.format === 'string' && item.params.format.trim()) {
       return item.params.format.trim().toLowerCase();
     }
     return 'mp3';
   }
-  if (isVideoItem(item)) return 'mp4';
+  if (mediaKind === 'video') return 'mp4';
   return 'png';
 }
 
@@ -123,13 +98,13 @@ export default function HistoryPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [previewItem, setPreviewItem] = useState<HistoryEntry | null>(null);
+  const [failedMediaIds, setFailedMediaIds] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     try {
-      const [historyRes, videoModelsRes, characterCardsRes] = await Promise.allSettled([
+      const [historyRes, videoModelsRes] = await Promise.allSettled([
         fetch('/api/user/history?limit=50', { cache: 'no-store' }),
         fetch('/api/video-models', { cache: 'no-store' }),
-        fetch('/api/user/character-cards?limit=50', { cache: 'no-store' }),
       ]);
 
       const nextItems: HistoryEntry[] = [];
@@ -141,13 +116,6 @@ export default function HistoryPage() {
             ...item,
             source: 'generation' as const,
           })));
-        }
-      }
-
-      if (characterCardsRes.status === 'fulfilled') {
-        const cardsData = await characterCardsRes.value.json().catch(() => ({}));
-        if (characterCardsRes.value.ok) {
-          nextItems.push(...((cardsData.data || []) as CharacterCard[]).map(characterCardToEntry));
         }
       }
 
@@ -189,6 +157,7 @@ export default function HistoryPage() {
 
   useEffect(() => {
     setSelectedIds((prev) => prev.filter((id) => items.some((item) => item.id === id)));
+    setFailedMediaIds((prev) => prev.filter((id) => items.some((item) => item.id === id)));
     if (selectionMode && items.length === 0) {
       setSelectionMode(false);
     }
@@ -202,8 +171,7 @@ export default function HistoryPage() {
     const video = items.filter((item) => isVideoItem(item)).length;
     const image = items.filter((item) => isImageItem(item)).length;
     const audio = items.filter((item) => isAudioItem(item)).length;
-    const character = items.filter((item) => isCharacterItem(item)).length;
-    return { total, video, image, audio, character };
+    return { total, video, image, audio };
   }, [items]);
 
   const filtered = useMemo(() => {
@@ -214,8 +182,6 @@ export default function HistoryPage() {
         return items.filter((item) => isImageItem(item));
       case 'audio':
         return items.filter((item) => isAudioItem(item));
-      case 'character':
-        return items.filter((item) => isCharacterItem(item));
       default:
         return items;
     }
@@ -236,11 +202,6 @@ export default function HistoryPage() {
     [selectedItems]
   );
 
-  const selectedCharacterIds = useMemo(
-    () => selectedItems.filter((item) => item.source === 'character-card').map((item) => item.id),
-    [selectedItems]
-  );
-
   const getModelLabel = (item: HistoryEntry) => {
     if (isVideoItem(item)) {
       return resolveVideoModelLabel({
@@ -256,7 +217,6 @@ export default function HistoryPage() {
 
     if (item.type === 'music') return 'AI 音乐';
     if (item.type === 'voice') return 'TTS 语音';
-    if (item.type === 'character-card') return '角色卡';
     return item.type;
   };
 
@@ -269,6 +229,14 @@ export default function HistoryPage() {
     }
     return '';
   };
+
+  const markMediaFailed = useCallback((id: string) => {
+    setFailedMediaIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
+
+  const isMediaExpired = useCallback((item: HistoryEntry) => {
+    return failedMediaIds.includes(item.id) || item.params?.runtimeMediaExpired === true;
+  }, [failedMediaIds]);
 
   const toggleSelected = useCallback((id: string) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
@@ -294,23 +262,6 @@ export default function HistoryPage() {
     });
   }, [filtered]);
 
-  const deleteCharacterCards = useCallback(async (ids: string[]) => {
-    if (ids.length === 0) return;
-    await Promise.all(
-      ids.map(async (id) => {
-        const response = await fetch('/api/user/character-cards', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cardId: id }),
-        });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.error || '删除角色卡失败');
-        }
-      })
-    );
-  }, []);
-
   const handleDeleteSelected = useCallback(async () => {
     if (busy || selectedIds.length === 0) return;
     const confirmed = window.confirm(`确认删除选中的 ${selectedIds.length} 项作品吗？`);
@@ -326,9 +277,6 @@ export default function HistoryPage() {
       if (selectedMediaIds.length > 0) {
         await deleteGenerationRecords(selectedMediaIds);
       }
-      if (selectedCharacterIds.length > 0) {
-        await deleteCharacterCards(selectedCharacterIds);
-      }
     } catch (error) {
       console.error('[HistoryPage] 批量删除失败:', error);
       setItems(snapshot);
@@ -336,7 +284,7 @@ export default function HistoryPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, deleteCharacterCards, items, load, selectedCharacterIds, selectedIds, selectedMediaIds]);
+  }, [busy, items, load, selectedIds, selectedMediaIds]);
 
   const handleClearMedia = useCallback(async () => {
     if (busy) return;
@@ -345,9 +293,9 @@ export default function HistoryPage() {
 
     const snapshot = items;
     setBusy(true);
-    setItems((prev) => prev.filter((item) => item.source === 'character-card'));
+    setItems([]);
     setSelectedIds([]);
-    setPreviewItem((prev) => (prev && prev.source === 'generation' ? null : prev));
+    setPreviewItem(null);
 
     try {
       const response = await fetch('/api/user/history/delete', {
@@ -369,35 +317,6 @@ export default function HistoryPage() {
     }
   }, [busy, items, load]);
 
-  const handleClearCharacterCards = useCallback(async () => {
-    if (busy) return;
-    const confirmed = window.confirm('确认清空全部角色卡吗？');
-    if (!confirmed) return;
-
-    const snapshot = items;
-    setBusy(true);
-    setItems((prev) => prev.filter((item) => item.source !== 'character-card'));
-    setSelectedIds((prev) => prev.filter((id) => !selectedCharacterIds.includes(id)));
-    setPreviewItem((prev) => (prev && prev.source === 'character-card' ? null : prev));
-
-    try {
-      const response = await fetch('/api/user/character-cards/delete-all', {
-        method: 'POST',
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.error || '清空角色卡失败');
-      }
-      setSelectionMode(false);
-    } catch (error) {
-      console.error('[HistoryPage] 清空角色卡失败:', error);
-      setItems(snapshot);
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  }, [busy, items, load, selectedCharacterIds]);
-
   const handleDownload = useCallback(async (item: HistoryEntry) => {
     if (!item.resultUrl) return;
     try {
@@ -408,6 +327,8 @@ export default function HistoryPage() {
   }, []);
 
   const renderPreview = (item: HistoryEntry) => {
+    const mediaKind = inferDisplayMediaKind(item);
+
     if (item.status === 'pending' || item.status === 'processing') {
       const upstreamLabel = getUpstreamStatusLabel(item);
       return (
@@ -431,8 +352,20 @@ export default function HistoryPage() {
         <div className="flex h-full flex-col items-center justify-center bg-red-500/10 px-4 text-red-200">
           <CircleAlert className="mb-3 h-8 w-8" />
           <p className="text-sm font-medium">{statusLabelMap[item.status]}</p>
-          <p className="mt-1 max-w-[92%] truncate text-xs text-red-200/65">
+          <p className="mt-1 line-clamp-3 max-w-[92%] text-center text-xs leading-5 text-red-200/65">
             {item.errorMessage || (upstreamLabel ? `上游：${upstreamLabel}` : '生成未成功完成')}
+          </p>
+        </div>
+      );
+    }
+
+    if (!item.resultUrl && isMediaExpired(item)) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center bg-amber-500/10 px-4 text-amber-100/85">
+          <Clock3 className="mb-3 h-8 w-8" />
+          <p className="text-sm font-medium">作品已过期</p>
+          <p className="mt-1 max-w-[92%] text-center text-xs leading-5 text-amber-100/65">
+            该文件已超过 24 小时缓存期，已从本站服务器删除。
           </p>
         </div>
       );
@@ -449,7 +382,7 @@ export default function HistoryPage() {
       );
     }
 
-    if (isVideoItem(item)) {
+    if (mediaKind === 'video') {
       return (
         <video
           src={item.resultUrl}
@@ -463,11 +396,12 @@ export default function HistoryPage() {
             event.currentTarget.pause();
             event.currentTarget.currentTime = 0;
           }}
+          onError={() => markMediaFailed(item.id)}
         />
       );
     }
 
-    if (isImageItem(item) || isCharacterItem(item)) {
+    if (mediaKind === 'image') {
       return (
         <img
           src={item.resultUrl}
@@ -475,15 +409,16 @@ export default function HistoryPage() {
           className="h-full w-full object-cover"
           loading="lazy"
           decoding="async"
+          onError={() => markMediaFailed(item.id)}
         />
       );
     }
 
-    if (isAudioItem(item)) {
+    if (mediaKind === 'audio') {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-violet-500/10 to-fuchsia-500/10 px-4 text-white/75">
           <Headphones className="h-8 w-8" />
-          <audio controls src={item.resultUrl} className="w-full max-w-[90%]" onClick={(e) => e.stopPropagation()} />
+          <audio controls src={item.resultUrl} className="w-full max-w-[90%]" onClick={(e) => e.stopPropagation()} onError={() => markMediaFailed(item.id)} />
         </div>
       );
     }
@@ -502,12 +437,15 @@ export default function HistoryPage() {
           <Clock3 className="h-3.5 w-3.5 text-emerald-300" />
           自动同步最近 50 条作品与上游状态
         </div>
+        <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100/85">
+          作品文件会优先缓存到本站服务器，默认保留 24 小时，过期后自动删除；请及时下载保存。
+        </div>
         <div>
           <h1 className="text-[2.35rem] font-semibold tracking-[-0.05em] text-white sm:text-5xl">
             作品库
           </h1>
           <p className="mt-2 max-w-3xl text-sm text-white/48 sm:text-base">
-            统一查看视频、图像、音频与角色卡作品，支持快速预览、状态追踪和结果下载。
+            统一查看视频、图像、音频作品，支持快速预览、状态追踪和结果下载。
           </p>
         </div>
       </div>
@@ -518,13 +456,11 @@ export default function HistoryPage() {
           ['视频', stats.video, 'video'],
           ['图像', stats.image, 'image'],
           ['音频', stats.audio, 'audio'],
-          ['角色卡', stats.character, 'character'],
         ].map(([label, value, iconKey]) => {
           const icon =
             iconKey === 'video' ? <Video className="h-4 w-4" /> :
             iconKey === 'image' ? <ImageIcon className="h-4 w-4" /> :
-            iconKey === 'audio' ? <Headphones className="h-4 w-4" /> :
-            iconKey === 'character' ? <User className="h-4 w-4" /> : null;
+            iconKey === 'audio' ? <Headphones className="h-4 w-4" /> : null;
 
           return (
             <div
@@ -606,15 +542,6 @@ export default function HistoryPage() {
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 清空媒体
               </button>
-              <button
-                type="button"
-                onClick={() => void handleClearCharacterCards()}
-                disabled={busy}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/75 transition hover:bg-white/[0.08] disabled:opacity-60"
-              >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                清空角色卡
-              </button>
             </div>
           </div>
         </div>
@@ -642,7 +569,7 @@ export default function HistoryPage() {
               </div>
               <p className="text-xl font-medium text-white/72">暂无作品</p>
               <p className="mt-2 max-w-md text-sm text-white/35">
-                生成完成的视频、图像、音频与角色卡会显示在这里
+                生成完成的视频、图像、音频会显示在这里
               </p>
             </div>
           ) : (
@@ -699,9 +626,7 @@ export default function HistoryPage() {
                           <ImageIcon className="h-3 w-3" />
                         ) : isAudioItem(item) ? (
                           <Headphones className="h-3 w-3" />
-                        ) : (
-                          <User className="h-3 w-3" />
-                        )}
+                        ) : null}
                         {getTypeLabel(item)}
                       </div>
 
@@ -727,7 +652,11 @@ export default function HistoryPage() {
                         <div className="mt-1 text-[11px] text-white/35">
                           {new Date(item.createdAt).toLocaleString('zh-CN')}
                         </div>
-                        {getUpstreamStatusLabel(item) ? (
+                        {item.status === 'failed' || item.status === 'cancelled' ? (
+                          <div className="mt-1 line-clamp-2 text-[11px] leading-5 text-red-200/72">
+                            {item.errorMessage || getUpstreamStatusLabel(item) || '生成未成功完成'}
+                          </div>
+                        ) : getUpstreamStatusLabel(item) ? (
                           <div className="mt-1 truncate text-[10px] text-white/28">
                             上游：{getUpstreamStatusLabel(item)}
                           </div>
@@ -789,21 +718,30 @@ export default function HistoryPage() {
               </div>
 
               <div className="flex flex-1 min-h-0 items-center justify-center bg-black/20 p-3 md:p-6">
-                {isVideoItem(previewItem) ? (
+                {isMediaExpired(previewItem) ? (
+                  <div className="flex h-full w-full max-w-2xl flex-col items-center justify-center rounded-xl border border-amber-400/20 bg-amber-500/10 px-6 text-center text-amber-100/85">
+                    <Clock3 className="mb-4 h-10 w-10" />
+                    <div className="text-base font-medium">该作品文件已过期</div>
+                    <div className="mt-2 text-sm text-amber-100/65">
+                      已超过 24 小时缓存期，本站已自动删除；如需继续使用，请重新生成并及时下载。
+                    </div>
+                  </div>
+                ) : inferDisplayMediaKind(previewItem) === 'video' ? (
                   <video
                     src={previewItem.resultUrl}
                     className="max-h-full max-w-full rounded-xl border border-white/10 object-contain"
                     controls
                     autoPlay
                     loop
+                    onError={() => markMediaFailed(previewItem.id)}
                   />
-                ) : isAudioItem(previewItem) ? (
+                ) : inferDisplayMediaKind(previewItem) === 'audio' ? (
                   <div className="flex h-full w-full items-center justify-center rounded-xl border border-white/10 bg-gradient-to-br from-violet-500/12 to-fuchsia-500/10 p-6">
                     <div className="w-full max-w-xl">
                       <div className="mb-4 flex items-center justify-center">
                         <Headphones className="h-10 w-10 text-white/60" />
                       </div>
-                      <audio src={previewItem.resultUrl} className="w-full" controls autoPlay />
+                      <audio src={previewItem.resultUrl} className="w-full" controls autoPlay onError={() => markMediaFailed(previewItem.id)} />
                     </div>
                   </div>
                 ) : (
@@ -812,6 +750,7 @@ export default function HistoryPage() {
                     alt={previewItem.prompt}
                     className="max-h-full max-w-full rounded-xl border border-white/10 object-contain"
                     decoding="async"
+                    onError={() => markMediaFailed(previewItem.id)}
                   />
                 )}
               </div>

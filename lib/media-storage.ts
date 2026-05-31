@@ -8,6 +8,7 @@ import {
   uploadToPicUI,
 } from './picui';
 import { fetchWithRetry } from './http-retry';
+import { inferMediaKindFromMimeType, inferMediaKindFromUrl, type MediaKind } from './media-kind';
 
 // ========================================
 // 媒体文件存储
@@ -17,14 +18,34 @@ import { fetchWithRetry } from './http-retry';
 const DATA_DIR = process.env.DATA_DIR || './data';
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
 const PUBLIC_RUNTIME_MEDIA_DIR = path.join(process.cwd(), 'public', 'runtime-media');
+const INTERNAL_RUNTIME_MEDIA_PATH_PATTERN = /\/api\/runtime-media\/([^/?#]+)/i;
 const MAX_REMOTE_MEDIA_BYTES = Math.max(
   1,
   Number(process.env.MEDIA_REMOTE_CACHE_MAX_BYTES) || 512 * 1024 * 1024
 );
+export const RUNTIME_MEDIA_RETENTION_MS = Math.max(
+  60 * 60 * 1000,
+  (Number(process.env.RUNTIME_MEDIA_RETENTION_HOURS) || 24) * 60 * 60 * 1000
+);
+const RUNTIME_MEDIA_CLEANUP_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.RUNTIME_MEDIA_CLEANUP_INTERVAL_MS) || 15 * 60 * 1000
+);
+
+let lastRuntimeMediaCleanupAt = 0;
+let runtimeMediaCleanupPromise: Promise<void> | null = null;
+let runtimeMediaCleanupTimer: NodeJS.Timeout | null = null;
 
 type SaveMediaOptions = {
   publicBaseUrl?: string;
   filename?: string;
+  storageMode?: 'auto' | 'runtime';
+};
+
+export type SavedMediaAsset = {
+  url: string;
+  mimeType?: string;
+  kind: MediaKind;
 };
 
 // 确保目录存在
@@ -50,6 +71,163 @@ async function ensurePublicRuntimeMediaDir(): Promise<void> {
   await Promise.all(
     resolvePublicRuntimeMediaDirs().map((dir) => fsp.mkdir(dir, { recursive: true }))
   );
+}
+
+function isExpiredTimestamp(timestampMs: number, now = Date.now()): boolean {
+  return Number.isFinite(timestampMs) && timestampMs > 0 && now - timestampMs >= RUNTIME_MEDIA_RETENTION_MS;
+}
+
+function inferTimestampFromRuntimeMediaFilename(filename: string): number | null {
+  const safeFilename = sanitizeFilename(filename);
+  if (!safeFilename) return null;
+
+  const epochMatch = safeFilename.match(/(?:^|[^0-9])(1\d{12})(?:[^0-9]|$)/);
+  if (epochMatch) {
+    const timestamp = Number(epochMatch[1]);
+    if (Number.isFinite(timestamp) && timestamp > 946684800000 && timestamp < 4102444800000) {
+      return timestamp;
+    }
+  }
+
+  const compactDateMatch = safeFilename.match(/(?:^|[^0-9])((?:20\d{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])(?:[0-5]\d){2})(?:[^0-9]|$)/);
+  if (compactDateMatch) {
+    const raw = compactDateMatch[1];
+    const parsed = Date.UTC(
+      Number(raw.slice(0, 4)),
+      Number(raw.slice(4, 6)) - 1,
+      Number(raw.slice(6, 8)),
+      Number(raw.slice(8, 10)),
+      Number(raw.slice(10, 12)),
+      Number(raw.slice(12, 14)),
+    );
+    if (Number.isFinite(parsed) && parsed > 946684800000 && parsed < 4102444800000) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function resolveRuntimeMediaTimestamp(filename: string, statMtimeMs: number): number {
+  return inferTimestampFromRuntimeMediaFilename(filename) ?? statMtimeMs;
+}
+
+async function deleteRuntimeMediaFilename(filename: string): Promise<void> {
+  const safeFilename = sanitizeFilename(filename);
+  if (!safeFilename) return;
+
+  await Promise.allSettled(
+    resolvePublicRuntimeMediaDirs().map(async (dir) => {
+      const filepath = path.join(dir, safeFilename);
+      try {
+        await fsp.unlink(filepath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+    })
+  );
+}
+
+export function extractRuntimeMediaFilenameFromUrl(
+  input: string,
+  origin?: string
+): string | null {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  const relativeMatch = value.match(INTERNAL_RUNTIME_MEDIA_PATH_PATTERN);
+  if (relativeMatch?.[1]) {
+    return sanitizeRuntimeMediaFilename(decodeURIComponent(relativeMatch[1]));
+  }
+
+  try {
+    const parsed = origin ? new URL(value, origin) : new URL(value);
+    const absoluteMatch = parsed.pathname.match(INTERNAL_RUNTIME_MEDIA_PATH_PATTERN);
+    if (!absoluteMatch?.[1]) return null;
+    return sanitizeRuntimeMediaFilename(decodeURIComponent(absoluteMatch[1]));
+  } catch {
+    return null;
+  }
+}
+
+export async function deletePublicRuntimeMediaByUrl(
+  input: string,
+  origin?: string
+): Promise<boolean> {
+  const filename = extractRuntimeMediaFilenameFromUrl(input, origin);
+  if (!filename) return false;
+  await deleteRuntimeMediaFilename(filename);
+  return true;
+}
+
+async function cleanupExpiredRuntimeMediaFiles(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastRuntimeMediaCleanupAt < RUNTIME_MEDIA_CLEANUP_INTERVAL_MS) {
+    return runtimeMediaCleanupPromise || Promise.resolve();
+  }
+
+  if (runtimeMediaCleanupPromise) {
+    return runtimeMediaCleanupPromise;
+  }
+
+  runtimeMediaCleanupPromise = (async () => {
+    lastRuntimeMediaCleanupAt = now;
+    const seen = new Set<string>();
+    for (const dir of resolvePublicRuntimeMediaDirs()) {
+      let entries: fs.Dirent[];
+      try {
+        entries = await fsp.readdir(dir, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (seen.has(entry.name)) continue;
+        seen.add(entry.name);
+
+        const filepath = path.join(dir, entry.name);
+        try {
+          const stat = await fsp.stat(filepath);
+          if (isExpiredTimestamp(resolveRuntimeMediaTimestamp(entry.name, stat.mtimeMs), now)) {
+            await deleteRuntimeMediaFilename(entry.name);
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            console.warn('[MediaStorage] Runtime media cleanup failed:', error);
+          }
+        }
+      }
+    }
+  })().finally(() => {
+    runtimeMediaCleanupPromise = null;
+  });
+
+  return runtimeMediaCleanupPromise;
+}
+
+function ensureRuntimeMediaCleanupScheduler(): void {
+  if (runtimeMediaCleanupTimer) return;
+
+  runtimeMediaCleanupTimer = setInterval(() => {
+    void cleanupExpiredRuntimeMediaFiles(true).catch((error) => {
+      console.warn('[MediaStorage] Scheduled runtime media cleanup failed:', error);
+    });
+  }, RUNTIME_MEDIA_CLEANUP_INTERVAL_MS);
+
+  runtimeMediaCleanupTimer.unref?.();
+
+  void cleanupExpiredRuntimeMediaFiles().catch((error) => {
+    console.warn('[MediaStorage] Initial runtime media cleanup failed:', error);
+  });
+}
+
+export async function triggerRuntimeMediaCleanup(force = false): Promise<void> {
+  ensureRuntimeMediaCleanupScheduler();
+  await cleanupExpiredRuntimeMediaFiles(force);
 }
 
 export function getPublicRuntimeMediaDir(): string {
@@ -110,7 +288,8 @@ function normalizePublicBaseUrl(raw?: string): string | null {
     if (
       hostname === 'localhost' ||
       hostname === '127.0.0.1' ||
-      hostname === '::1'
+      hostname === '::1' ||
+      hostname === '0.0.0.0'
     ) {
       return null;
     }
@@ -223,14 +402,25 @@ export async function saveMediaAsync(
   dataUrl: string,
   options: SaveMediaOptions = {}
 ): Promise<string> {
+  return (await saveMediaAsset(id, dataUrl, options)).url;
+}
+
+export async function saveMediaAsset(
+  id: string,
+  dataUrl: string,
+  options: SaveMediaOptions = {}
+): Promise<SavedMediaAsset> {
+  const storageMode = options.storageMode || 'auto';
+  const runtimeOnly = storageMode === 'runtime';
   const configuredBucket = await resolveDefaultImageBucket();
 
   if (isRemoteUrl(dataUrl)) {
     try {
       const remote = await downloadRemoteMedia(dataUrl);
       const filename = options.filename || filenameFromUrl(id, dataUrl, remote.mimeType);
+      const kind = inferMediaKindFromMimeType(remote.mimeType);
 
-      if (configuredBucket) {
+      if (!runtimeOnly && configuredBucket) {
         try {
           const uploadedUrl = await uploadBufferToImageBucket(
             remote.buffer,
@@ -240,42 +430,63 @@ export async function saveMediaAsync(
           );
           if (uploadedUrl) {
             console.log(`[MediaStorage] Cached remote media to bucket: ${uploadedUrl}`);
-            return uploadedUrl;
+            return {
+              url: uploadedUrl,
+              mimeType: remote.mimeType,
+              kind,
+            };
           }
         } catch (bucketError) {
           console.warn('[MediaStorage] Remote bucket cache failed, falling back to local runtime media:', bucketError);
         }
       }
 
-      const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, {
+      const runtimeUrl = await saveBufferToPublicFile(id, remote.buffer, remote.mimeType, {
         ...options,
         filename,
       });
       if (runtimeUrl) {
         console.log(`[MediaStorage] Cached remote media to runtime media: ${runtimeUrl}`);
-        return runtimeUrl;
+        return {
+          url: runtimeUrl,
+          mimeType: remote.mimeType,
+          kind,
+        };
       }
     } catch (error) {
       console.warn('[MediaStorage] Remote media cache failed, keeping original URL:', error);
     }
 
-    return dataUrl;
+    return {
+      url: dataUrl,
+      kind: inferMediaKindFromUrl(dataUrl),
+    };
   }
 
   // 如果不是 data URL，直接返回（可能是其他外部标识）
   if (!dataUrl.startsWith('data:')) {
-    return dataUrl;
+    return {
+      url: dataUrl,
+      kind: inferMediaKindFromUrl(dataUrl),
+    };
   }
 
+  const parsed = parseDataUrl(dataUrl);
+  const mimeType = parsed?.mimeType || 'application/octet-stream';
+  const kind = inferMediaKindFromMimeType(mimeType);
+
   // 优先尝试上传到默认图片桶
-  if (configuredBucket) {
+  if (!runtimeOnly && configuredBucket) {
     try {
-      const parsed = parseDataUrl(dataUrl);
-      const filename = options.filename || `${id}.${getExtension(parsed?.mimeType || 'image/jpeg')}`;
+      const filename = options.filename || `${id}.${getExtension(mimeType)}`;
       const picuiUrl = await uploadToPicUI(dataUrl, filename, { publicBaseUrl: options.publicBaseUrl });
       if (picuiUrl) {
         console.log(`[MediaStorage] Uploaded to remote bucket: ${picuiUrl}`);
-        return picuiUrl;
+        return {
+          url: picuiUrl,
+          mimeType,
+          kind,
+        };
       }
     } catch (error) {
       console.warn('[MediaStorage] Remote upload failed, falling back to local runtime media:', error);
@@ -284,20 +495,69 @@ export async function saveMediaAsync(
     const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, options);
     if (runtimeUrl) {
       console.log(`[MediaStorage] Saved media to runtime media: ${runtimeUrl}`);
-      return runtimeUrl;
+      return {
+        url: runtimeUrl,
+        mimeType,
+        kind,
+      };
     }
 
-    return dataUrl;
+    return {
+      url: dataUrl,
+      mimeType,
+      kind,
+    };
   }
 
   const runtimeUrl = await saveMediaToPublicFile(id, dataUrl, options);
   if (runtimeUrl) {
     console.log(`[MediaStorage] Saved media to runtime media: ${runtimeUrl}`);
-    return runtimeUrl;
+    return {
+      url: runtimeUrl,
+      mimeType,
+      kind,
+    };
   }
 
   // 回退到本地文件存储
-  return await saveMediaToFile(id, dataUrl);
+  return {
+    url: await saveMediaToFile(id, dataUrl),
+    mimeType,
+    kind,
+  };
+}
+
+export async function saveBufferToPublicFile(
+  id: string,
+  buffer: Buffer,
+  mimeType: string,
+  options: SaveMediaOptions = {}
+): Promise<string | null> {
+  ensureRuntimeMediaCleanupScheduler();
+  const publicBaseUrl =
+    normalizePublicBaseUrl(options.publicBaseUrl)
+    || normalizePublicBaseUrl(
+      process.env.SANHUB_PUBLIC_BASE_URL || process.env.NEXTAUTH_URL || process.env.APP_URL || process.env.PUBLIC_BASE_URL
+    );
+  if (!publicBaseUrl) {
+    return null;
+  }
+
+  await ensurePublicRuntimeMediaDir();
+  await cleanupExpiredRuntimeMediaFiles();
+
+  const normalizedMimeType = mimeType.split(';')[0]?.trim().toLowerCase() || 'application/octet-stream';
+  const fallbackFilename = `${id}.${getExtension(normalizedMimeType)}`;
+  const filename = sanitizeFilename(options.filename || fallbackFilename);
+  const filenameWithExtension = /\.[a-z0-9]{2,5}$/i.test(filename)
+    ? filename
+    : `${filename}.${getExtension(normalizedMimeType)}`;
+  const runtimeDirs = resolvePublicRuntimeMediaDirs();
+  await Promise.all(
+    runtimeDirs.map((dir) => fsp.writeFile(path.join(dir, filenameWithExtension), buffer))
+  );
+
+  return `${publicBaseUrl}/api/runtime-media/${encodeURIComponent(filenameWithExtension)}`;
 }
 
 export async function saveMediaToPublicFile(
@@ -305,13 +565,6 @@ export async function saveMediaToPublicFile(
   input: string,
   options: SaveMediaOptions = {}
 ): Promise<string | null> {
-  const publicBaseUrl = normalizePublicBaseUrl(
-    options.publicBaseUrl || process.env.NEXTAUTH_URL || process.env.APP_URL
-  );
-  if (!publicBaseUrl) {
-    return null;
-  }
-
   let buffer: Buffer;
   let mimeType: string;
 
@@ -328,22 +581,13 @@ export async function saveMediaToPublicFile(
     mimeType = parsed.mimeType;
   }
 
-  await ensurePublicRuntimeMediaDir();
-
-  const filename = sanitizeFilename(
-    options.filename || `${id}.${getExtension(mimeType)}`
-  );
-  const runtimeDirs = resolvePublicRuntimeMediaDirs();
-  await Promise.all(
-    runtimeDirs.map((dir) => fsp.writeFile(path.join(dir, filename), buffer))
-  );
-
-  return `${publicBaseUrl}/api/runtime-media/${encodeURIComponent(filename)}`;
+  return saveBufferToPublicFile(id, buffer, mimeType, options);
 }
 
 export async function readPublicRuntimeMediaFile(
   filename: string
 ): Promise<{ buffer: Buffer; mimeType: string; filename: string } | null> {
+  ensureRuntimeMediaCleanupScheduler();
   try {
     const safeFilename = sanitizeFilename(filename);
     if (!safeFilename) {
@@ -352,8 +596,13 @@ export async function readPublicRuntimeMediaFile(
 
     let buffer: Buffer | null = null;
     for (const dir of resolvePublicRuntimeMediaDirs()) {
-      const filepath = path.join(dir, safeFilename);
-      try {
+        const filepath = path.join(dir, safeFilename);
+        try {
+          const stat = await fsp.stat(filepath);
+          if (isExpiredTimestamp(resolveRuntimeMediaTimestamp(safeFilename, stat.mtimeMs))) {
+            await deleteRuntimeMediaFilename(safeFilename);
+            return null;
+          }
         buffer = await fsp.readFile(filepath);
         break;
       } catch (error) {

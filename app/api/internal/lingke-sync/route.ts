@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createHash } from 'crypto';
 import { initializeDatabase } from '@/lib/db';
 import { createDatabaseAdapter } from '@/lib/db-adapter';
+import { triggerRuntimeMediaCleanup } from '@/lib/media-storage';
 import {
   parseGenerationParams,
   refreshLingkeImageGenerationIfNeeded,
@@ -67,6 +68,10 @@ export async function POST(request: NextRequest) {
     if (!isInternalSyncAuthorized(request)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+
+    await triggerRuntimeMediaCleanup().catch((error) => {
+      console.warn('[LingkeSync] Runtime media cleanup skipped:', error);
+    });
 
     await initializeDatabase();
     const db = createDatabaseAdapter();

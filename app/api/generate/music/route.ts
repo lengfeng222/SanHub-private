@@ -5,6 +5,7 @@ import { generateAudio } from '@/lib/audio-generator';
 import { getSystemConfig, getUserById, saveGeneration, updateGeneration, updateUserBalance, refundGenerationBalance } from '@/lib/db';
 import { saveMediaAsync } from '@/lib/media-storage';
 import { calculateBillingCost } from '@/lib/billing';
+import { getBaseUrlFromRequest } from '@/lib/epay';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 600;
@@ -67,8 +68,9 @@ export async function POST(request: NextRequest) {
 
     const result = await generateAudio({ kind: KIND, prompt, model, voice, format });
     const savedUrl = await saveMediaAsync(generation.id, result.url, {
-      publicBaseUrl: new URL(request.url).origin,
+      publicBaseUrl: getBaseUrlFromRequest(request),
       filename: `${generation.id}.${result.format || 'mp3'}`,
+      storageMode: 'runtime',
     });
 
     await updateGeneration(generation.id, {
@@ -92,10 +94,16 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    let errorMessage = error instanceof Error ? error.message : '生成失败';
+    if (/上游渠道余额不足|Insufficient balance/i.test(errorMessage)) {
+      const requiredCost = chargedCost > 0 ? chargedCost : DEFAULT_COST;
+      errorMessage = `音乐模型接口错误：上游渠道余额不足，本次预计需要 ${requiredCost} 积分`;
+    }
+
     if (generationId) {
       await updateGeneration(generationId, {
         status: 'failed',
-        errorMessage: error instanceof Error ? error.message : '生成失败',
+        errorMessage,
       }).catch(() => {});
     }
     if (generationId && userId && chargedCost > 0) {
@@ -103,7 +111,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : '生成失败' },
+      { error: errorMessage },
       { status: 500 }
     );
   }

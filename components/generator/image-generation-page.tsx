@@ -14,7 +14,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { calculateBillingCost } from '@/lib/billing';
-import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
+import { compressImageToWebP } from '@/lib/image-compression';
+import { uploadMediaFileToPublicUrl } from '@/lib/client-media-upload';
 import type { Generation, SafeImageModel, DailyLimitConfig } from '@/types';
 import { toast } from '@/components/ui/toaster';
 import type { Task } from '@/components/generator/result-gallery';
@@ -263,6 +264,24 @@ export function ImageGenerationPage({
       onClearExternalReference?.();
     }
   }, [availableModels, clearImages, onClearExternalReference, selectedModelId]);
+
+  useEffect(() => {
+    if (!availableModels.length) {
+      if (selectedModelId) {
+        setSelectedModelId('');
+      }
+      return;
+    }
+
+    if (selectedModelId && availableModels.some((model) => model.id === selectedModelId)) {
+      return;
+    }
+
+    const fallbackModel = currentModel || availableModels[0];
+    if (fallbackModel?.id && fallbackModel.id !== selectedModelId) {
+      setSelectedModelId(fallbackModel.id);
+    }
+  }, [availableModels, currentModel, selectedModelId]);
 
   useEffect(() => {
     if (!externalReference || images.length === 0) return;
@@ -618,31 +637,35 @@ export function ImageGenerationPage({
     return null;
   };
 
-  const compressImagesIfNeeded = async (): Promise<Array<{ mimeType: string; data: string }>> => {
+  const uploadReferenceImagesIfNeeded = async (): Promise<string[]> => {
     if (images.length === 0) return [];
 
     setCompressing(true);
     setError('');
 
     try {
-      const compressedImages = [];
+      const uploadedUrls: string[] = [];
 
       for (const img of images) {
-        let base64 = compressedCache.get(img.file);
+        let uploadedUrl = compressedCache.get(img.file);
 
-        if (!base64) {
-          const compressedFile = await compressImageToWebP(img.file);
-          base64 = await fileToBase64(compressedFile);
-          setCompressedCache((prev) => new Map(prev).set(img.file, base64!));
+        if (!uploadedUrl) {
+          try {
+            const compressedFile = await compressImageToWebP(img.file);
+            const uploaded = await uploadMediaFileToPublicUrl(compressedFile);
+            uploadedUrl = uploaded.url;
+          } catch {
+            const uploaded = await uploadMediaFileToPublicUrl(img.file);
+            uploadedUrl = uploaded.url;
+          }
+
+          setCompressedCache((prev) => new Map(prev).set(img.file, uploadedUrl!));
         }
 
-        compressedImages.push({
-          mimeType: 'image/jpeg',
-          data: `data:image/jpeg;base64,${base64}`,
-        });
+        uploadedUrls.push(uploadedUrl);
       }
 
-      return compressedImages;
+      return uploadedUrls;
     } finally {
       setCompressing(false);
     }
@@ -650,7 +673,7 @@ export function ImageGenerationPage({
 
   const submitSingleTask = async (
     taskPrompt: string,
-    compressedImages: Array<{ mimeType: string; data: string }> | undefined,
+    referenceImages: string[] | undefined,
     clientRequestId: string
   ) => {
     if (!currentModel) throw new Error('请选择模型');
@@ -663,8 +686,13 @@ export function ImageGenerationPage({
         prompt: taskPrompt,
         aspectRatio,
         imageSize: currentModel.features.imageSize ? imageSize : undefined,
-        quality: (currentModel.channelType === 'apexerapi' || currentModel.channelType === 'openai-compatible' || currentModel.channelType === 'openai-chat') && currentModel.apiModel.toLowerCase().includes('gpt-image-2') && (!currentModel.features.qualityOptions || currentModel.features.qualityOptions.length === 0 || currentModel.features.qualityOptions.includes(quality)) ? quality : undefined,
-        images: compressedImages || [],
+        quality:
+          !currentModel.features.qualityOptions ||
+          currentModel.features.qualityOptions.length === 0 ||
+          currentModel.features.qualityOptions.includes(quality)
+            ? quality
+            : undefined,
+        referenceImages: referenceImages || [],
         referenceImageUrl: externalReference?.sourceUrl,
         clientRequestId,
       }),
@@ -719,14 +747,14 @@ export function ImageGenerationPage({
     const taskPrompt = prompt.trim();
 
     try {
-      const compressedImages = await compressImagesIfNeeded();
+      const uploadedReferenceImages = await uploadReferenceImagesIfNeeded();
       const requestCount = parseQuantityCount(quantity);
       const batchRequestId = createClientRequestId();
       const results = await Promise.allSettled(
         Array.from({ length: requestCount }, (_, index) =>
           submitSingleTask(
             taskPrompt,
-            compressedImages,
+            uploadedReferenceImages,
             requestCount === 1 ? batchRequestId : `${batchRequestId}-${index}`
           )
         )
@@ -788,11 +816,11 @@ export function ImageGenerationPage({
     const taskPrompt = prompt.trim();
 
     try {
-      const compressedImages = await compressImagesIfNeeded();
+      const uploadedReferenceImages = await uploadReferenceImagesIfNeeded();
       const batchRequestId = createClientRequestId();
       const results = await Promise.allSettled(
         Array.from({ length: 3 }, (_, index) =>
-          submitSingleTask(taskPrompt, compressedImages, `${batchRequestId}-${index}`)
+          submitSingleTask(taskPrompt, uploadedReferenceImages, `${batchRequestId}-${index}`)
         )
       );
       const successfulCount = results.filter((result) => result.status === 'fulfilled').length;
@@ -989,26 +1017,37 @@ export function ImageGenerationPage({
 
             {(() => {
               if (!currentModel) return null;
-              if (currentModel.channelType !== 'apexerapi' && currentModel.channelType !== 'openai-compatible' && currentModel.channelType !== 'openai-chat') return null;
-              if (!currentModel.apiModel.toLowerCase().includes('gpt-image-2')) return null;
               const qOpts = currentModel.features.qualityOptions;
-              const allQualities = [
-                { value: 'low', label: '低' },
-                { value: 'medium', label: '中' },
-                { value: 'high', label: '高' },
-              ];
-              const available = qOpts && qOpts.length > 0
-                ? allQualities.filter(q => qOpts.includes(q.value))
-                : allQualities;
-              if (available.length === 0) return null;
-              const safeValue = available.some(q => q.value === quality) ? quality : available[0].value;
+              const fallbackQualities = currentModel.apiModel.toLowerCase().includes('gpt-image-2')
+                ? ['low', 'medium', 'high']
+                : [];
+              const values = (qOpts && qOpts.length > 0 ? qOpts : fallbackQualities)
+                .map((item) => item.toLowerCase())
+                .filter(Boolean);
+
+              if (values.length === 0) return null;
+
+              const labelMap: Record<string, string> = {
+                auto: '自动',
+                low: '低',
+                medium: '中',
+                high: '高',
+                standard: '标准',
+                pro: '专业',
+                fast: '快速',
+              };
+              const available = values.map((value) => ({
+                value,
+                label: labelMap[value] || value.toUpperCase(),
+              }));
+              const safeValue = available.some((item) => item.value === quality) ? quality : available[0].value;
               if (safeValue !== quality) {
                 queueMicrotask(() => setQuality(safeValue));
               }
               return (
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-foreground/50 whitespace-nowrap">质量</span>
-                  <div className="w-[68px]">
+                  <div className="w-[76px]">
                     <CustomSelect
                       value={safeValue}
                       onValueChange={setQuality}
